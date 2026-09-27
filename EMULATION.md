@@ -134,7 +134,7 @@ r0=0 / 2 / 3 は停止画面 (`Demo Mode` / `Not e-Design Product!`) だが、**
 上記を入れると、次のような UART 出力が得られる。
 
 ```
-SystemClk:8000000
+SystemClk:8000000     <- RCC を 0xFFFFFFFF で埋めているための値。実機は 96MHz
 DataCheckArr[0]:0
 ...
 DataCheckArr[10]:0
