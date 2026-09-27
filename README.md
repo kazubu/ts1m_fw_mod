@@ -18,7 +18,8 @@ DFU ドライブのファイルが外部 SPI フラッシュ上にあること�
 
 - [ANALYSIS.md](ANALYSIS.md) — ファーム本体の解析結果
 - [EMULATION.md](EMULATION.md) — Unicorn によるエミュレーションの手順と知見
-- [ts1m_emu.py](ts1m_emu.py) — エミュレータのハーネス
+- [ts1m_emu.py](ts1m_emu.py) — アプリのエミュレータハーネス
+- [bl_emu.py](bl_emu.py) — ブートローダのエミュレータハーネス (IDChip 1-Wire / 加速度センサー I2C をモデル化)
 - [hex2bin.py](hex2bin.py) — Intel HEX → raw binary 変換
 - [patches/](patches/) — 目標温度到達通知 + 自動ブースト + ブースト表示のパッチ (ANALYSIS.md 11章)、診断パッチ (チップ ID、DFU ファイル探索、ブートローダ吸い出し)
 
@@ -39,7 +40,7 @@ DFU ドライブのファイルが外部 SPI フラッシュ上にあること�
 - 設定ファイル `TS1M.TXT` は外部 SPI フラッシュ (W25Q64、SPI2) の FatFs ボリューム上にある。エミュレータにもモデルを入れた
 - DFU ドライブに置いたファイルも外部 SPI フラッシュ上にある (MARK.BIN は `0x247000` から 64KB 連続)
 - ADC: ch10 = こて先熱電対、ch12 = 冷接点、ch13 = 電源電圧、ch0 = 外部熱電対 (校正モード CAL で使用)
-- MCU のピン/周辺の全体マップを両ファームから作成 (ANALYSIS.md 15章)。ヒーター=**PA1 (TIM5_CH2)**、表示=SPI1 (SCK PA5/MOSI PA7/DC PB0/BL PA8)、フラッシュ=SPI2 (PB12-15)、こて先=USART2 (PA2/PA3)、ブザー=TIM4/PB8、ADC1 入力=PA0/PA4/PC0-4、MUX 選択 7 本、IDChip 認証=PD5/PD6 の I2C。リマップ・EXTI は無し
+- MCU のピン/周辺の全体マップを両ファームから作成 (ANALYSIS.md 15章)。ヒーター=**PA1 (TIM5_CH2)**、表示=SPI1 (SCK PA5/MOSI PA7/DC PB0/BL PA8)、フラッシュ=SPI2 (PB12-15)、こて先=USART2 (PA2/PA3)、ブザー=TIM4/PB8、ADC1 入力=PA0/PA4/PC0-4、MUX 選択 7 本、IDChip 認証=PB11 の 1-Wire、加速度センサー=PD5/PD6 の I2C。リマップ・EXTI は無し
 - 設定メニューには隠し項目がある: QkTmp (BoostTemp) と RGB 照明 (RGB FX / Mode / Bright / Red / Green / Blue)。RGB の値で LED を駆動する処理は無い
 - 華氏モードでは CalibraVal が絶対温度として換算され、0 のままだと表示が約 4.9% 高く出る可能性がある (実機未確認)
 
