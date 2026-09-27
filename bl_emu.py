@@ -64,23 +64,34 @@ class OneWire:
     helper returns the 8-byte ROM id. .cmds records the commands seen.
     """
 
-    def __init__(self, rom=None, present=True):
+    def __init__(self, rom=None, memory=None, present=True):
         # default ROM: family 0x01 (DS2401-style), 6-byte serial, CRC placeholder
         self.rom = bytearray(rom) if rom else bytearray(b'\x01\x22\x33\x44\x55\x66\x77\x8f')
+        self.memory = bytearray(memory) if memory else bytearray(256)
         self.present = present
         self.cmds = []
         self.ptr = 0
         self._src = None
+        self._expect = 0                       # bytes of address still to arrive
 
     def reset(self):
         self.ptr = 0
         self._src = None
+        self._expect = 0
         return 0x40 if self.present else 0     # nonzero presence count
 
     def write(self, byte):
         self.cmds.append(byte)
-        if byte == 0x33 or byte == 0x0F:      # Read ROM
+        if self._expect:                       # collecting a Read Memory address
+            self.ptr = (self.ptr | (byte << (8 * (2 - self._expect)))) & 0xFFFF
+            self._expect -= 1
+            if self._expect == 0:
+                self._src = self.memory
+        elif byte in (0x33, 0x0F):             # Read ROM
             self._src, self.ptr = self.rom, 0
+        elif byte == 0xF0:                     # Read Memory: next 2 bytes = address
+            self._expect, self.ptr = 2, 0
+        # 0xCC (Skip ROM) and others: no addressing change
 
     def read(self):
         if self._src is not None and self.ptr < len(self._src):
