@@ -37,7 +37,9 @@ TIP_DETECT_FN = 0x80199A8     # tip classification
 RES_CHECK_FN = 0x8022490      # resistance sanity check
 HEATER_FN = 0x80214A0         # heater / PID control, called every main loop
 THERMOCOUPLE_FN = 0x80193B8   # thermocouple processing (no ADC reads inside)
-HALT_SCREEN_FN = 0x8013A40    # "Demo Mode" / "Not e-Design Product!" + spin
+HALT_SCREEN_FN = 0x8013A40    # auth/status helper, r0 = mode:
+                              #   0 "Demo Mode" + spin, 1 record timestamp (normal),
+                              #   2 "Demo Mode" 3s -> 3, 3 "Not e-Design Product!" + spin
 PUTCHAR_STORE = 0x801E9AE     # USART1 putchar: r4 holds the byte
 
 GPIO_RESET_FN = 0x80140B8     # BRR  (pin -> low)
@@ -46,6 +48,23 @@ GPIO_SET_FN = 0x80140BC       # BSRR (pin -> high)
 MS_TICK = 0x200003BC          # millisecond counter polled by delay loops
 IRONTYPE = 0x200003D3         # current tip type
 SETTINGS_BASE = 0x200015A4    # settings struct (NOT a pointer)
+SETTINGS_DEFAULTS = 0x0802A4E6  # flash table with the same 22-byte layout
+
+# Temperature control (see ANALYSIS.md, "温度制御")
+MODE = 0x2000023C             # u8  1 work, 2 sleep, 0/3 heater off
+CUR_TEMP = 0x2000023E         # s16 current tip temperature, 0.1 deg
+TARGET_TEMP = 0x200001F4      # s16 PID target, 0.1 deg (rewritten every heater pass)
+HEATER_STATE = 0x200001D2     # u8  0 measure+PID, 1 wait for ADC IRQ, 2 heater off
+PID_FN = 0x8015494            # PID(r0 = current temp), reads TARGET_TEMP
+INPUT_FN = 0x801EB58          # stand / sleep state machine, drives MODE
+FACTORY_CAL = 0x08077D00      # factory record, u16 x10 + sum (DataCheckArr)
+TEMP_CAL = 0x08077C00         # per-tip temperature calibration, u16 x5 (x/1000) + sum
+SPI_SR_FN = 0x8015ADC         # SPI status poll used by the display driver
+LCD_WINDOW_FN = 0x8014DA4     # set_window(x0, y0, x1, y1) + RAMWR
+LCD_DATA16_FN = 0x8015040     # write one 16-bit word to the panel
+LCD_DMA_FN = 0x8016FA4        # dma_send(channel, count), source = channel CMAR
+LCD_W, LCD_H = 320, 172
+FLIPOVER = 20                 # settings index; != 0 reads the accelerometer via the bootloader
 
 # Status-register helpers the firmware spins on
 STATUS_HELPERS = {0x8012058, 0x8012020, 0x801200C, 0x8017728, 0x8012B7C}
@@ -108,17 +127,37 @@ class Emu:
     adc_hook     optional callable(emu, key) -> value, overrides adc_values
     force_tip    if set, the tip classifier is stubbed to return this type
     skip_res     bypass the resistance sanity check (keeps a forced tip alive)
+    defaults     load the default settings table (settings are otherwise all 0
+                 because TS1M.TXT does not exist here), a neutral temperature
+                 calibration and a supply-voltage calibration, so CUR_TEMP /
+                 TARGET_TEMP and the supply voltage get real values.
+                 FlipOver is forced to 0 (it calls into the missing bootloader).
+    lcd          keep a 320x172 RGB565 frame buffer of what is sent to the
+                 panel (window + per-pixel writes + DMA); see save_png()
+    work_mode    keep the heater in "work" (MODE=1): stubs the stand / sleep
+                 state machine and stands in for the ADC interrupt that normally
+                 releases HEATER_STATE 1 -> 0, so every heater pass measures and
+                 runs the PID. Needs defaults=True to be meaningful.
     """
 
     def __init__(self, image_path='TS1M_Master_APP_V202_EN.bin',
                  adc_values=None, adc_hook=None,
                  force_tip=None, skip_res=False,
+                 defaults=False, work_mode=False, lcd=False,
                  echo=False, progress=False):
         self.image = open(image_path, 'rb').read()
         self.adc_values = adc_values or {}
         self.adc_hook = adc_hook
         self.force_tip = force_tip
         self.skip_res = skip_res
+        self.defaults = defaults
+        self.work_mode = work_mode
+        self.heater_calls = 0
+        self.tick_every = 50        # instructions per emulated millisecond
+        self.lcd = lcd
+        self.fb = [0] * (LCD_W * LCD_H) if lcd else None
+        self._win = (0, 0, 0, 0)
+        self._cur = 0
         self.echo = echo            # print UART bytes as they arrive
         self.progress = progress    # print an instruction counter while running
 
@@ -136,6 +175,13 @@ class Emu:
             mu.mem_map(base, size)
         mu.mem_write(FLASH_BASE, self.image)
         self.mu = mu
+        if defaults:
+            mu.mem_write(TEMP_CAL, struct.pack('<6H', 1000, 1000, 1000, 1000, 1000, 5000))
+            # Factory record (DataCheckArr, u16 x10 + sum). [9] scales the supply
+            # voltage (ch13 * 7.77 * [9] / 1000 mV); 0 means "LowVol" on the heat screen.
+            fac = [0] * 10
+            fac[9] = 1000
+            mu.mem_write(FACTORY_CAL, struct.pack('<11H', *fac, sum(fac)))
 
         self._install_uid()
         self._seed_peripherals()
@@ -182,13 +228,39 @@ class Emu:
         self.n += 1
 
         # Advance the millisecond counter the delay loops poll.
-        if self.n % 50 == 0:
+        if self.n % self.tick_every == 0:
             t = struct.unpack('<I', uc.mem_read(MS_TICK, 4))[0]
             uc.mem_write(MS_TICK, struct.pack('<I', (t + 1) & 0xFFFFFFFF))
 
         # Refresh status registers right before any spin-wait helper runs.
         if address in STATUS_HELPERS:
             self._seed_peripherals()
+
+        # SPI SR (+8): TXE|RXNE, otherwise every display transfer waits out
+        # a 6000-iteration timeout.
+        if address == SPI_SR_FN:
+            base = uc.reg_read(UC_ARM_REG_R0)
+            if base in (0x40013000, 0x40003800, 0x40003C00):
+                uc.mem_write(base + 8, b'\x03\x00')
+
+        if self.lcd:
+            self._lcd(uc, address)
+
+        if address == HEATER_FN:
+            self.heater_calls += 1
+            if self.defaults and self.heater_calls == 1:
+                o = SETTINGS_DEFAULTS - FLASH_BASE
+                uc.mem_write(SETTINGS_BASE, self.image[o:o + 33 * 22])
+                self.set_setting(FLIPOVER, 0)
+            if self.work_mode:
+                uc.mem_write(MODE, b'\x01')
+                if uc.mem_read(HEATER_STATE, 1)[0] == 1:
+                    uc.mem_write(HEATER_STATE, b'\x00')
+
+        if self.work_mode and address == INPUT_FN and self.heater_calls:
+            uc.reg_write(UC_ARM_REG_R0, 0)
+            uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
+            return
 
         # Track analog-mux select lines.
         if address in (GPIO_RESET_FN, GPIO_SET_FN):
@@ -241,7 +313,8 @@ class Emu:
                              f'{len(self.out)} UART bytes\n')
             sys.stderr.flush()
 
-        if address == HALT_SCREEN_FN:
+        # Only modes 0/2/3 are the halt screens; mode 1 is a routine call.
+        if address == HALT_SCREEN_FN and uc.reg_read(UC_ARM_REG_R0) != 1:
             self.halted = True
             uc.emu_stop()
 
@@ -267,6 +340,64 @@ class Emu:
     def set_setting(self, index, value):
         addr = SETTINGS_BASE + settings_offset(index)
         self.mu.mem_write(addr, struct.pack('<h', value))
+
+    # -- virtual panel ----------------------------------------------------
+
+    def _lcd_put(self, value):
+        x0, y0, x1, y1 = self._win
+        w = x1 - x0 + 1
+        n = w * (y1 - y0 + 1)
+        if w <= 0 or n <= 0:
+            return
+        i = self._cur % n
+        x, y = x0 + i % w, y0 + i // w
+        if 0 <= x < LCD_W and 0 <= y < LCD_H:
+            self.fb[y * LCD_W + x] = value
+        self._cur += 1
+
+    def _lcd(self, uc, address):
+        if address == LCD_WINDOW_FN:
+            r = [uc.reg_read(x) for x in (UC_ARM_REG_R0, UC_ARM_REG_R1,
+                                          UC_ARM_REG_R2, UC_ARM_REG_R3)]
+            self._win = tuple(v & 0xFFFF for v in r)
+            self._cur = 0
+        elif address == LCD_DATA16_FN:
+            lr = uc.reg_read(UC_ARM_REG_LR) & ~1
+            if not LCD_WINDOW_FN <= lr < LCD_WINDOW_FN + 0x74:   # not a CASET/RASET argument
+                self._lcd_put(uc.reg_read(UC_ARM_REG_R0) & 0xFFFF)
+        elif address == LCD_DMA_FN:
+            ch = uc.reg_read(UC_ARM_REG_R0)
+            count = uc.reg_read(UC_ARM_REG_R1) & 0xFFFF
+            src = struct.unpack('<I', uc.mem_read(ch + 0x0C, 4))[0]
+            try:
+                data = uc.mem_read(src, count * 2)
+            except UcError:
+                return
+            for (v,) in struct.iter_unpack('<H', bytes(data)):
+                self._lcd_put(v)
+
+    def save_png(self, path, scale=2):
+        """Write the virtual panel as a PNG (no PIL needed)."""
+        import zlib
+        rows = []
+        for y in range(LCD_H):
+            row = bytearray(b'\x00')
+            for x in range(LCD_W):
+                v = self.fb[y * LCD_W + x]
+                px = bytes(((v >> 11) * 255 // 31, (v >> 5 & 63) * 255 // 63, (v & 31) * 255 // 31))
+                row += px * scale
+            rows.extend([bytes(row)] * scale)
+
+        def chunk(tag, data):
+            return (struct.pack('>I', len(data)) + tag + data
+                    + struct.pack('>I', zlib.crc32(tag + data) & 0xFFFFFFFF))
+        ihdr = struct.pack('>IIBBBBB', LCD_W * scale, LCD_H * scale, 8, 2, 0, 0, 0)
+        with open(path, 'wb') as fh:
+            fh.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr)
+                     + chunk(b'IDAT', zlib.compress(b''.join(rows), 6)) + chunk(b'IEND', b''))
+
+    def s16(self, addr):
+        return struct.unpack('<h', self.mu.mem_read(addr, 2))[0]
 
 
 # ---------------------------------------------------------------- demo
