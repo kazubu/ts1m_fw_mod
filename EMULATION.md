@@ -238,6 +238,38 @@ UI はページ構造 (`0x200004CC`、+8 が現在ページ、+0x3C から 28バ
 
 この状態で目標温度 `0x200001F4` = WorkTemp1 (3000) になり、PID の出力 `0x200001D0` が変化する。
 
+## モデル化したハードウェア状態 (ピン・タイマ・UART)
+
+`Emu` は実行中に GPIO・タイマ・UART の状態を追跡し、実行後に読み出せる (ANALYSIS.md 15章)。
+
+| API | 内容 |
+| --- | --- |
+| `e.pin('PA1')` | GPIO ピンの駆動レベル (0/1)。ODR/BSRR/BRR のシャドウ (Unicorn は BSRR→ODR の副作用を再現しないため必須)。**AF/タイマ出力ピンは反映されない** |
+| `e.pins()` | High に駆動中のピンの集合 |
+| `e.pin_mode('PC4')` | CRL/CRH から読むピンのモード (`'AIN'` / `'AF_PP_50'` / `'OUT_PP_50'` …)。Unicorn メモリを直接読むので正確 |
+| `e.heater_on` | TIM5 (CH2 = **PA1** ヒーターゲート) が有効か |
+| `e.heater_log` | ヒーターの ON/OFF 遷移 `(命令数, on)` の履歴 |
+| `e.buzzer_duty` / `e.backlight_duty` | TIM4_CH3 (PB8) / TIM1_CH1 (PA8) の比較値 |
+| `e.uart_tx[2]` / `e.uart_tx[4]` | ファームが USART2 (こて先リンク/治具) / UART4 に送ったバイト列 |
+
+追跡は GPIO/UART レジスタ範囲に**限定した**書き込みフック (7 章の全域フックは壊れるので範囲を絞る) と、タイマヘルパー (`TIM_Cmd` `0x08016A9E` / `TIM_CCxCmd` `0x08016C24` / `SetCompareN`) のコードフックで行う。
+
+> 注意: `_seed_peripherals` は以前 GPIO ベース (オフセット 0 = CRL) に `0xFFFFFFFF` を書いてピン設定を壊していた。GPIO には offset 0 に status レジスタが無いので、この seed は削除した (`pin_mode` が正しく読めるようになった)。
+
+### 測定/加熱サイクルを回す (`sim_measure=True`)
+
+ヒーター (PA1/TIM5_CH2) は ADC 注入変換割り込み (ベクタ 34) が駆動する測定/加熱サイクルの中で ON/OFF する。
+Unicorn は割り込みを模擬しないため、通常はこのサイクルが進まず、メインループのエミュレーションでは PA1 が動かない
+(以前 PA1 を「idle」と誤認した原因)。
+
+`Emu(defaults=True, work_mode=True, sim_measure=True)` を指定すると、`run()` をスライス実行し、その合間に
+測定開始メソッド (`0x08012F3C`、ヒーター OFF) と測定終了メソッド (`0x08013A20`、ヒーター ON) を
+退避コンテキスト付きのネスト実行で呼ぶ。これにより TIM5/CH2 (PA1) が実機同様にトグルし、`heater_log` で観測できる。
+
+```
+python3 ts1m_emu.py --sim -q        # モデル化したピン/タイマ/ヒーター状態を表示
+```
+
 ## 温度変数の特定 (測定点を分離)
 
 `Emu(force_tip=1, skip_res=True, defaults=True)` で、4つの測定点を**1つずつ**ランプさせた (他は 2000 固定)。

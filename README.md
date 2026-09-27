@@ -166,6 +166,9 @@ UID 照合の回避、周辺レジスタのモデル化、Unicorn 側の落と�
 | `lcd=True` | パネルへの送信を 320×172 のフレームバッファに再現し、`save_png()` で画像にする |
 | `spi_flash` | 外部 SPI フラッシュ (W25Q64) を模擬。設定を実際の TS1M.TXT 経由で読む (`--make-flash` / `--flash`) |
 | `adc_hook` | 測定点ごとに ADC 値を注入する |
+| `sim_measure=True` | 測定/加熱サイクルを駆動し、ヒーター (PA1/TIM5_CH2) を実機同様にトグルさせる |
+
+GPIO・タイマ・UART の状態も追跡する: `e.pin('PA1')` / `e.pin_mode('PC4')` / `e.pins()`、`e.heater_on` / `e.heater_log`、`e.buzzer_duty` / `e.backlight_duty`、`e.uart_tx[2]` (USART2) / `e.uart_tx[4]` (UART4)。`python3 ts1m_emu.py --sim -q` で一覧を表示 (ANALYSIS.md 15章、EMULATION.md)。
 
 ## 注意
 
