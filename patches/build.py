@@ -6,6 +6,8 @@ Build a patched TS1M HEX from one of the patch sources in this directory.
 
     PATCH  notify_boost (default)  target-reached beep, auto boost, boost indicator
            chipid                  diagnostic: show the chip ID on the home screen
+           findmark                diagnostic: find MARK.BIN in the SPI flash, show its address
+           dumpboot                diagnostic: copy the bootloader over MARK.BIN (at 0x247000)
 
 Produces next to the input:
     *_<PATCH>.hex   patched HEX, only the affected lines rewritten
@@ -13,7 +15,7 @@ Produces next to the input:
     *_<PATCH>.bin   flat image for ts1m_emu.py
 
 Each patch is built against the original firmware on its own; they are not
-meant to be combined (both use the same free area).
+meant to be combined (all use the same free area).
 
 Needs arm-none-eabi-as / arm-none-eabi-ld / arm-none-eabi-objcopy.
 """
@@ -57,6 +59,32 @@ PATCHES = {
         'expect': {
             0x080201C6: bytes.fromhex('50f82100'),                  # ldr.w r0, [r0, r1, lsl #2]
             0x080201CA: bytes.fromhex('0c21'),                      # movs r1, #12
+        },
+    },
+    'findmark': {
+        'sites': [
+            (0x080201CC, bytes.fromhex('f4f732fb'), 'findmark_label'), # bl drawString (tip name)
+        ],
+        'expect': {
+            0x080201C6: bytes.fromhex('50f82100'),                  # ldr.w r0, [r0, r1, lsl #2]
+            0x080201CA: bytes.fromhex('0c21'),                      # movs r1, #12
+            0x08017E7C: bytes.fromhex('064a10b5'),                  # flash cs()
+            0x08017F50: bytes.fromhex('2de9f041'),                  # flash xfer()
+            0x08014C68: bytes.fromhex('02494af6'),                  # IWDG reload
+        },
+    },
+    'dumpboot': {
+        'sites': [
+            (0x080201CC, bytes.fromhex('f4f732fb'), 'dumpboot_label'), # bl drawString (tip name)
+        ],
+        'expect': {
+            0x080201C6: bytes.fromhex('50f82100'),                  # ldr.w r0, [r0, r1, lsl #2]
+            0x080201CA: bytes.fromhex('0c21'),                      # movs r1, #12
+            0x08017E7C: bytes.fromhex('064a10b5'),                  # flash cs()
+            0x08017F50: bytes.fromhex('2de9f041'),                  # flash xfer()
+            0x08017ECA: bytes.fromhex('10b50446'),                  # flash wren()
+            0x08017E9C: bytes.fromhex('10b501e0'),                  # flash wait-not-busy
+            0x08014C68: bytes.fromhex('02494af6'),                  # IWDG reload
         },
     },
 }
