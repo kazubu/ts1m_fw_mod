@@ -11,7 +11,10 @@ MINIWARE TS1M はんだごてステーションのファームウェア解析と
 
 ただし温度関連の RAM 変数アドレスが未特定のため、狙った機能 (目標温度到達通知・自動ブースト) はまだ動いていない。
 
-詳細は [ANALYSIS.md](ANALYSIS.md) を参照。
+- [ANALYSIS.md](ANALYSIS.md) — ファーム本体の解析結果
+- [EMULATION.md](EMULATION.md) — Unicorn によるエミュレーションの手順と知見
+- [ts1m_emu.py](ts1m_emu.py) — エミュレータのハーネス
+- [hex2bin.py](hex2bin.py) — Intel HEX → raw binary 変換
 
 ## 分かっていること (要点)
 
@@ -21,6 +24,7 @@ MINIWARE TS1M はんだごてステーションのファームウェア解析と
 - `TS80P` の種類コードは存在するが**到達不能**
 - 起動時に チップ UID を照合し、不一致なら `Demo Mode` で停止する
 - 工場検査モードは、工場校正レコードが壊れている場合のみ自動で起動する
+- **エミュレータ上でメインループまで起動でき、UART デバッグ出力が取得できる**
 
 ## DFU 書き込み
 
@@ -28,6 +32,20 @@ MINIWARE TS1M はんだごてステーションのファームウェア解析と
 
 HEX 全体を再シリアライズすると反映されない可能性を疑っているが、**未確認**。
 詳細は ANALYSIS.md の「7. DFU 書き込みについて」を参照。
+
+## エミュレーション
+
+`ts1m_emu.py` で Unicorn 上に起動できる。UART デバッグログが丸ごと取れるので、
+SWD が無い状況では最も情報量の多い手段。
+
+```
+pip install unicorn capstone
+python3 hex2bin.py TS1M_Master_APP_V202_EN.hex
+python3 ts1m_emu.py
+```
+
+UID 照合の回避、周辺レジスタのモデル化、Unicorn 側の落とし穴 (読み出しフックが効かない、
+書き込みフックで異常終了する) については EMULATION.md にまとめてある。
 
 ## 注意
 
