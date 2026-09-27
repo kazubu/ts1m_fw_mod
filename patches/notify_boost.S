@@ -29,7 +29,7 @@
     .equ MAGIC,        0x4D315354   @ "TS1M"; RAM is not zeroed at reset, so self-init
     .equ TARGET,       0x200001F4   @ u16 target temp (PID struct +0)
     .equ MODE,         0x2000023C   @ u8  1 = working, 2 = sleep, 0/3 = heater off
-    .equ TCMODE,       0x20000914   @ u16 != 0: thermocouple measuring mode
+    .equ TCMODE,       0x20000914   @ u16 != 0: auto-calibration (CAL) mode, fixed 300.0 target
     .equ MSTICK,       0x200003BC   @ u32 millisecond counter
     .equ BUZZER,       0x20000330   @ buzzer object, +4 = beep(pattern)
     .equ PATTERN,      0x0802A7CC   @ built-in pattern: 2 x 80 ms beeps
