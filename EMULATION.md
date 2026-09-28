@@ -1,30 +1,32 @@
-# エミュレーションによる解析
+> Japanese version: [EMULATION.ja.md](EMULATION.ja.md)
 
-`ts1m_emu.py` は Unicorn (ARM Cortex-M3) 上で TS1M のアプリファームを起動し、
-メインループまで到達させるためのハーネス。UART デバッグ出力の取得と、
-測定点ごとの ADC 値注入ができる。
+# Analysis by Emulation
+
+`ts1m_emu.py` is a harness that boots the TS1M application firmware on Unicorn (ARM Cortex-M3)
+and drives it as far as the main loop. It can capture UART debug output and
+inject ADC values per measurement point.
 
 ```
 pip install unicorn capstone
 python3 hex2bin.py TS1M_Master_APP_V202_EN.hex    # -> *_EN.bin
-python3 ts1m_emu.py                                # 起動してUARTログを表示
+python3 ts1m_emu.py                                # boot and show the UART log
 ```
 
-UART 出力は実行しながら流れる。進捗は stderr に出る。
+The UART output streams while it runs. Progress is printed to stderr.
 
-**実行時間に注意**: Unicorn は速くないので数分かかる。既定は2000万命令で、
-これでメインループ到達まで届く (UART の最初の行は約4万命令、`ironType` の
-PID ログは1000万命令以内)。`-n` で増減できる。
+**Note on execution time**: Unicorn is not fast, so it takes several minutes. The default is 20 million instructions,
+which is enough to reach the main loop (the first UART line is at about 40 thousand instructions, and the `ironType`
+PID log is within 10 million instructions). Use `-n` to increase or decrease it.
 
 ```
-python3 ts1m_emu.py -n 5000000     # 短く
-python3 ts1m_emu.py -q             # 実行中のエコーを止めて最後にまとめて表示
+python3 ts1m_emu.py -n 5000000     # shorter
+python3 ts1m_emu.py -q             # stop the live echo and print everything at the end
 ```
 
-## HEX から BIN への変換
+## Converting HEX to BIN
 
-`ts1m_emu.py` は **`0x08010000` を先頭とするフラットなバイナリ**を読む。
-同梱の `hex2bin.py` か objcopy のどちらでもよい (出力は同一であることを確認済み)。
+`ts1m_emu.py` reads a **flat binary starting at `0x08010000`**.
+Either the bundled `hex2bin.py` or objcopy works (the output is confirmed identical).
 
 ```
 python3 hex2bin.py TS1M_Master_APP_V202_EN.hex TS1M_Master_APP_V202_EN.bin
@@ -34,107 +36,109 @@ python3 hex2bin.py TS1M_Master_APP_V202_EN.hex TS1M_Master_APP_V202_EN.bin
 objcopy -I ihex -O binary TS1M_Master_APP_V202_EN.hex TS1M_Master_APP_V202_EN.bin
 ```
 
-配布 HEX は `0x08010000`〜`0x080773C4` が連続しているので、どちらでも 422852 バイトになる。
+The distributed HEX is contiguous from `0x08010000` to `0x080773C4`, so either way it is 422852 bytes.
 
-注意: 隙間は 0xFF (消去済みフラッシュ) で埋めること。解析の初期に隙間を 0x00 で
-埋めたバイナリを使ったため、`0x08060000` 付近の未使用領域を「0x00 のパディング」と
-誤認した。実際にはその領域は HEX に含まれず、消去状態の 0xFF。
+Note: fill the gaps with 0xFF (erased flash). Early in the analysis a binary that filled the gaps with 0x00 was used,
+which caused the unused region around `0x08060000` to be mistaken for "0x00 padding". In reality that region is not
+included in the HEX and is in the erased state, 0xFF.
 
-## 動かないときは
+## When it does not run
 
-`emu_selftest.py` が切り分けを自動でやる。
+`emu_selftest.py` does the triage automatically.
 
 ```
 python3 emu_selftest.py
 ```
 
-unicorn のバージョンと基本動作、bin の妥当性 (初期SP / リセットベクタ)、
-起動がどこまで到達したか、UART が取れているかを順に確認する。
+It checks, in order, the unicorn version and basic operation, the validity of the bin (initial SP / reset vector),
+how far the boot got, and whether UART is being captured.
 
-確認済みの動作環境: unicorn 2.1.4 (Python バインディング)。
-1.x 系はフックの扱いが異なるため動作未確認。
+Confirmed working environment: unicorn 2.1.4 (Python bindings).
+The 1.x series handles hooks differently and has not been verified to work.
 
-よくある原因:
+Common causes:
 
-- `.bin` のベースアドレスが違う (`0x08000000` 起点にしてしまう等)。
-  初期SPが `0x2000cfc8`、リセットベクタが `0x0801085d` にならなければ変換が誤っている
-- unicorn が古い、または `UC_HOOK_CODE` が発火しないビルド
-- 命令数が足りない (`run(count=...)` の既定は1億2千万。UART の最初の行は
-  約3.6万命令で出るので、出ないなら到達以前の問題)
+- The base address of the `.bin` is wrong (e.g. based at `0x08000000`).
+  If the initial SP is not `0x2000cfc8` and the reset vector is not `0x0801085d`, the conversion is wrong
+- unicorn is old, or a build where `UC_HOOK_CODE` does not fire
+- Not enough instructions (the default for `run(count=...)` is 120 million. The first UART line comes out at
+  about 36 thousand instructions, so if it does not appear the problem is before that point)
 
-## 起動を通すために必要だったこと
+## What was needed to get the boot through
 
-ファームは周辺デバイスの応答を待つ箇所が多く、素の Unicorn では次々に足踏みする。
-以下はすべて実際に詰まった箇所と、その対処。
+The firmware has many places where it waits for peripheral responses, and on bare Unicorn it stalls one after another.
+Below are all the places where it actually got stuck, and how each was handled.
 
-### 1. UID 照合 (最初の関門)
+### 1. UID matching (the first gate)
 
-起動時にチップ UID (`0x1FFFF7E8` から12バイト) を読み、ブートローダ領域
-`0x0800FFF0` の値と照合する。保存値は各32bitワードを `0x0800FFF0` で XOR した形式。
-不一致だと `0x08013A40` (`Demo Mode` / `Not e-Design Product!` 表示 + ウォッチドッグを
-叩きながら無限ループ) に落ちる。
+At boot it reads the chip UID (12 bytes from `0x1FFFF7E8`) and compares it against the value in the bootloader region
+`0x0800FFF0`. The stored value is each 32-bit word XORed with `0x0800FFF0`.
+On a mismatch it falls into `0x08013A40` (an infinite loop that displays `Demo Mode` / `Not e-Design Product!`
+while kicking the watchdog).
 
-ブートローダは配布 HEX に含まれないので、UID から逆算した値を `0x0800FFF0` に書く。
+The bootloader is not included in the distributed HEX, so write the value back-computed from the UID to `0x0800FFF0`.
 
-### 2. `UC_HOOK_MEM_READ` は使えない
+### 2. `UC_HOOK_MEM_READ` cannot be used
 
-**重要**: `UC_HOOK_MEM_READ` のコールバック内で `mem_write` しても、
-その読み出し命令が観測する値は変わらない。
+**Important**: doing a `mem_write` inside a `UC_HOOK_MEM_READ` callback does not change
+the value that the read instruction observes.
 
-この落とし穴に気づくまで「周辺レジスタに 0xFF を返している」つもりで
-実際には 0 が読まれており、解析が大きく遠回りになった。
-周辺レジスタは**実メモリに直接シード**すること。
+Until this pitfall was noticed, the analysis took a big detour: while believing it was "returning 0xFF to peripheral
+registers", 0 was actually being read.
+Seed peripheral registers **directly into real memory**.
 
-### 3. ミリ秒カウンタ
+### 3. Millisecond counter
 
-`0x200003BC` がシステムのミリ秒カウンタ。`0x08016F88` がこれを読んで経過時間を返し、
-`0x08012F04` が指定時間まで待つ。SysTick 割り込みをエミュレートしていないので
-カウンタが進まず、待ちループから出られない。命令数に応じて加算する。
+`0x200003BC` is the system millisecond counter. `0x08016F88` reads it and returns the elapsed time,
+and `0x08012F04` waits until a specified time. Because the SysTick interrupt is not emulated,
+the counter does not advance and it cannot get out of the wait loop. Increment it in proportion to the instruction count.
 
 ### 4. ADC
 
-- 変換完了待ち: SR (`+0x00`) に EOC/JEOC を立てる
-- キャリブレーション完了待ち: CR2 (`+0x08`) の該当ビットをクリアしておく
-- ファームは CR2 に `0x90000000` のビットが立つのを待つ箇所がある
+- Waiting for conversion complete: set EOC/JEOC in SR (`+0x00`)
+- Waiting for calibration complete: keep the relevant bit in CR2 (`+0x08`) cleared
+- The firmware has a place where it waits for the `0x90000000` bits to be set in CR2
 
-ADC1 の CR2 (`0x40012408`) は一時180万回ポーリングされていた。
+The CR2 of ADC1 (`0x40012408`) was at one point polled 1.8 million times.
 
 ### 5. USART
 
-printf の出力先。SR に TXE/TC (`0xC0`) を立てる。
-`0x0801E99C` が putchar で、`0x0801E9AE` で r4 のバイトを DR に書く。
-ここをフックすればデバッグ出力を丸ごと取得できる。
+The output destination of printf. Set TXE/TC (`0xC0`) in SR.
+`0x0801E99C` is putchar, and `0x0801E9AE` writes the byte in r4 to DR.
+Hooking here captures the entire debug output.
 
 ### 6. DMA
 
-`0x40020000` の ISR。全フラグを立てる。
+The ISR at `0x40020000`. Set all flags.
 
-### 7. `UC_HOOK_MEM_WRITE` を広範囲に張ると壊れる
+### 7. Stretching `UC_HOOK_MEM_WRITE` over a wide range breaks it
 
-RAM 全域 (`0x20000000`-`0x2000FFFF`) に書き込みフックを張ると、
-毎回ちょうど 524318 命令で `UC_ERR_WRITE_UNMAPPED` を出して停止する。
-フックなしなら1億2千万命令以上完走するので、Unicorn 側の問題と思われる。
+If a write hook is placed over the entire RAM (`0x20000000`-`0x2000FFFF`),
+it stops every time at exactly 524318 instructions with `UC_ERR_WRITE_UNMAPPED`.
+Without the hook it runs to completion over 120 million instructions, so this seems to be a problem on the Unicorn side.
 
-RAM の変化を追うときは**定期的にスナップショットを取って差分を見る**こと。
+When tracking changes in RAM, **take periodic snapshots and look at the diffs**.
 
-### 8. SPI (表示)
+### 8. SPI (display)
 
-表示ドライバは SPI1 (`0x40013000`) の SR (`+0x08`) の TXE/RXNE を 6000 回までポーリングする
-(`0x08015ADC`)。ここを埋めないと描画のたびにタイムアウト待ちになり、設定を読み込んだ状態では
-メインループがほとんど進まない。`0x08015ADC` の直前に SR に `0x0003` を書く。
+The display driver polls the TXE/RXNE of the SR (`+0x08`) of SPI1 (`0x40013000`) up to 6000 times
+(`0x08015ADC`). If this is not filled in, every draw waits for a timeout, and once settings are loaded
+the main loop hardly advances. Write `0x0003` to SR just before `0x08015ADC`.
 
-### 9. `0x08013A40` は停止画面そのものではない
+### 9. `0x08013A40` is not the halt screen itself
 
-以前は `0x08013A40` に入ったら「Demo Mode で停止」とみなしていたが、この関数は r0 で分岐する。
-r0=0 / 2 / 3 は停止画面 (`Demo Mode` / `Not e-Design Product!`) だが、**r0=1 は時刻を記録して戻るだけの正常系**。
-設定を読み込むと入力処理がこれを r0=1 で呼ぶので、誤って停止扱いしていた。現在は r0≠1 のときだけ停止とする。
+Previously, entering `0x08013A40` was treated as "halt in Demo Mode", but this function branches on r0.
+r0=0 / 2 / 3 are halt screens (`Demo Mode` / `Not e-Design Product!`), but **r0=1 is a normal path that just records
+the time and returns**.
+Once settings are loaded, the input processing calls this with r0=1, so it was being wrongly treated as a halt.
+Now only r0≠1 is treated as a halt.
 
-## 到達できる状態
+## The state that can be reached
 
-上記を入れると、次のような UART 出力が得られる。
+With the above in place, UART output like the following is obtained.
 
 ```
-SystemClk:8000000     <- RCC を 0xFFFFFFFF で埋めているための値。実機は 96MHz
+SystemClk:8000000     <- the value because RCC is filled with 0xFFFFFFFF. On real hardware it is 96MHz
 DataCheckArr[0]:0
 ...
 DataCheckArr[10]:0
@@ -143,206 +147,208 @@ ironType:0x1 P:1.00  I:0.20   D:4.00  FF:0.15
  28V
 ```
 
-メインループの各関数が周回していることも確認済み (1億2千万命令で約1万回ずつ)。
+It is also confirmed that each function of the main loop is cycling (about 10 thousand times each at 120 million instructions).
 
-| 関数 | 役割 |
+| Function | Role |
 | --- | --- |
-| `0x0801EAA4` | 入力 / スリープ処理 |
-| `0x08022098` | こて先判定 |
-| `0x080199A8` | ADC 分類 |
-| `0x080214A0` | **ヒーター / PID 制御** |
-| `0x08022944` | 描画 |
+| `0x0801EAA4` | Input / sleep processing |
+| `0x08022098` | Tip detection |
+| `0x080199A8` | ADC classification |
+| `0x080214A0` | **Heater / PID control** |
+| `0x08022944` | Drawing |
 
-`0x080214A0` がメインループから毎周呼ばれていることは、この計測で確認した。
+That `0x080214A0` is called on every cycle from the main loop was confirmed by this measurement.
 
-## アナログマルチプレクサと測定点
+## Analog multiplexer and measurement points
 
-こて先の測定はアナログスイッチで経路を切り替えて ADC ch10 を読む。
-選択線は **PB3 / PC12 / PD2 / PA6 / PD3 / PB4**。
+The tip measurement switches the path with an analog switch and reads ADC ch10.
+The select lines are **PB3 / PC12 / PD2 / PA6 / PD3 / PB4**.
 
-GPIO 操作関数:
+GPIO operation functions:
 
-| アドレス | 動作 |
+| Address | Action |
 | --- | --- |
-| `0x080140B8` | BRR (`+0x14`) — ピンを Low |
-| `0x080140BC` | BSRR (`+0x10`) — ピンを High |
+| `0x080140B8` | BRR (`+0x14`) — pin Low |
+| `0x080140BC` | BSRR (`+0x10`) — pin High |
 
-こて先判定ループ中の測定点は4つ。firmware 自身のデバッグ出力
-(`1_5 adc1:... adc2:...` / `1_2 adc3:... adc4:...`) と対応する。
+There are four measurement points during the tip detection loop. They correspond to the firmware's own debug output
+(`1_5 adc1:... adc2:...` / `1_2 adc3:... adc4:...`).
 
-| PD2 | PD3 | PB4 | ch | ログ上の名前 |
+| PD2 | PD3 | PB4 | ch | Name in the log |
 | --- | --- | --- | --- | --- |
 | 1 | 0 | 0 | 10 | adc1 |
 | 1 | 1 | 0 | 10 | adc2 |
 | 0 | 0 | 0 | 10 | adc3 |
 | 0 | 0 | 1 | 10 | adc4 |
 
-対応は、測定点ごとに異なる値を注入してデバッグ出力と突き合わせて確認済み。
+The correspondence was confirmed by injecting a different value per measurement point and matching against the debug output.
 
-### 注意: 経路は動作モードで変わる
+### Note: the path changes with the operating mode
 
-`force_tip` でこて先判定関数をスキップすると mux の切り替えが起きなくなり、
-別の測定パターン (ch0 / ch12 / ch13 を mux 全 0 で読む) になる。
-**どの測定点が読まれるかは動作モードに依存する**ので、
-ADC 値を注入するときは `adc_log` で実際に読まれたキーを確認すること。
+If the tip detection function is skipped with `force_tip`, the mux switching no longer happens and
+a different measurement pattern occurs (reading ch0 / ch12 / ch13 with the mux all 0).
+**Which measurement point is read depends on the operating mode**, so
+when injecting ADC values, confirm the key that was actually read with `adc_log`.
 
-## 仮想パネル (`lcd=True`)
+## Virtual panel (`lcd=True`)
 
-`Emu(lcd=True)` でパネルに送られた画素を 320×172 の RGB565 フレームバッファに再現し、
-`save_png(path)` で画像にできる (PIL 不要)。
+With `Emu(lcd=True)`, the pixels sent to the panel are reproduced into a 320×172 RGB565 frame buffer, and
+`save_png(path)` can turn it into an image (no PIL required).
 
-| 関数 | 扱い |
+| Function | Handling |
 | --- | --- |
-| `0x08014DA4(x0, y0, x1, y1)` | 描画窓の設定 (CASET/RASET/RAMWR、172行パネルのオフセット 34 は関数内で加算) |
-| `0x08015040(v)` | 16bit データ 1語。窓設定関数の中からの呼び出し (座標) は除外 |
-| `0x08016FA4(ch, count)` | DMA 転送。転送元はそのチャネルの CMAR (`ch+0x0C`) |
+| `0x08014DA4(x0, y0, x1, y1)` | Set the drawing window (CASET/RASET/RAMWR; the offset 34 of the 172-row panel is added inside the function) |
+| `0x08015040(v)` | One word of 16-bit data. Calls from inside the window-setting function (coordinates) are excluded |
+| `0x08016FA4(ch, count)` | DMA transfer. The transfer source is the CMAR of that channel (`ch+0x0C`) |
 
-UI はページ構造 (`0x200004CC`、+8 が現在ページ、+0x3C から 28バイトずつのページ表)。
-各ページは (+8 描画, +12 更新) の関数を持ち、更新関数は変化があったときだけ描画関数を呼ぶ。
+The UI has a page structure (`0x200004CC`; +8 is the current page, and from +0x3C there is a page table of 28 bytes each).
+Each page has functions (+8 draw, +12 update), and the update function calls the draw function only when there is a change.
 
-| ページ | 描画 | 内容 |
+| Page | Draw | Content |
 | --- | --- | --- |
-| 0 `0x20000508` | `0x08020169` | ホーム (設定 / 加熱 / 温度計のアイコン) |
-| 1 `0x20000524` | `0x0801F4FD` | 加熱画面。**入ると動作モードを 1 (作業) にする** |
-| 2 `0x20000540` | `0x080203ED` | 設定メニュー (DefWork / WorkTmp1-3 / SlpTmp …) |
-| 3 `0x2000055C` | `0x0801FF81` | グラフ画面 |
+| 0 `0x20000508` | `0x08020169` | Home (settings / heat / thermometer icons) |
+| 1 `0x20000524` | `0x0801F4FD` | Heat screen. **Entering it sets the operating mode to 1 (work)** |
+| 2 `0x20000540` | `0x080203ED` | Settings menu (DefWork / WorkTmp1-3 / SlpTmp …) |
+| 3 `0x2000055C` | `0x0801FF81` | Graph screen |
 
-キー入力は模擬していないので、ページは `0x200004D4` に直接書き、ページの +16 に 1 を書いて全体を再描画させる。
+Key input is not simulated, so write the page directly to `0x200004D4` and write 1 to +16 of the page to force a full redraw.
 
-注意:
-- 描画は重い。加熱画面の初回描画だけで数百万命令かかり、ヒーター制御の周回が極端に遅くなる。
-  ミリ秒カウンタは命令数で進めているので、時間依存の処理 (ブーストの 20秒打ち切り等) を見るときは
-  起動後に `tick_every` (既定 50命令/ms) を大きくする
-- 現在温度の表示は SysTick で更新される移動平均 (`0x20009DD4`) を使う。SysTick は模擬していないので
-  表示は `000` のまま
-- 電源電圧は ch13 × 7.77 × 工場校正 [9] / 1000 (mV)。工場校正が 0 だと加熱画面で `LowVol` 警告になる
-  (`defaults=True` で [9]=1000 を入れる。ch13=3100 で約 24V)
+Notes:
+- Drawing is heavy. The first draw of the heat screen alone takes several million instructions, and the heater control
+  cycling becomes extremely slow.
+  Since the millisecond counter is advanced by instruction count, when observing time-dependent processing (such as the
+  20-second cutoff of boost), increase `tick_every` (default 50 instructions/ms) after boot
+- The current-temperature display uses a moving average (`0x20009DD4`) updated by SysTick. SysTick is not simulated, so
+  the display stays `000`
+- The supply voltage is ch13 × 7.77 × factory calibration [9] / 1000 (mV). If the factory calibration is 0, the heat screen
+  gives a `LowVol` warning
+  (with `defaults=True`, [9]=1000 is set. At ch13=3100 it is about 24V)
 
-## 温度制御を動かす (`defaults` / `work_mode`)
+## Getting temperature control running (`defaults` / `work_mode`)
 
-素のままだと現在温度・目標温度はどちらも 0 のままになる。原因と対処:
+Bare, both the current temperature and the target temperature stay at 0. Causes and remedies:
 
-| 原因 | 対処 (`Emu(defaults=True)`) |
+| Cause | Remedy (`Emu(defaults=True)`) |
 | --- | --- |
-| 設定構造体 `0x200015A4` が全て 0 (`TS1M.TXT` が無いため読まれない。`0x08077E00` を 0xFF にしても同じ) | 最初のヒーター呼び出しで、フラッシュの初期値テーブル `0x0802A4E6` (同じ 22バイト構成) をコピー |
-| 温度校正係数 `0x20000930` が 0 で、現在温度 = 多項式 × 係数/1000 が 0 になる | フラッシュ `0x08077C00` に `1000×5 + 合計` を置く |
-| 設定 `FlipOver` が 1 だと加速度センサーをブートローダ経由で読み、存在しないコードに飛ぶ | `FlipOver = 0` |
+| The settings struct `0x200015A4` is all 0 (`TS1M.TXT` does not exist so it is not read. Setting `0x08077E00` to 0xFF is the same) | On the first heater call, copy the flash default table `0x0802A4E6` (same 22-byte layout) |
+| The temperature calibration coefficient `0x20000930` is 0, so current temperature = polynomial × coefficient/1000 becomes 0 | Place `1000×5 + total` in flash `0x08077C00` |
+| If the setting `FlipOver` is 1, the accelerometer is read via the bootloader and it jumps to code that does not exist | `FlipOver = 0` |
 
-作業状態 (`Emu(work_mode=True)`):
+Work state (`Emu(work_mode=True)`):
 
-| 原因 | 対処 |
+| Cause | Remedy |
 | --- | --- |
-| 動作モード `0x2000023C` が 0 (待機) のまま | 毎回 1 に固定 |
-| スタンド / スリープ状態機械 `0x0801EB58` がモードを書き戻す | 呼び出しを空にする |
-| ヒーター制御の状態 `0x200001D2` は PID 後に 1 になり、ADC 割り込み (ベクタ 34) が戻すまで測定しない。割り込みは模擬していない | 1 なら 0 に戻す (毎回測定+PID が走る) |
+| The operating mode `0x2000023C` stays 0 (idle) | Force it to 1 every time |
+| The stand / sleep state machine `0x0801EB58` writes the mode back | Make the call a no-op |
+| The heater control state `0x200001D2` becomes 1 after PID, and does not measure until the ADC interrupt (vector 34) returns it. The interrupt is not simulated | If it is 1, return it to 0 (measurement+PID runs every time) |
 
-この状態で目標温度 `0x200001F4` = WorkTemp1 (3000) になり、PID の出力 `0x200001D0` が変化する。
+In this state the target temperature `0x200001F4` = WorkTemp1 (3000), and the PID output `0x200001D0` changes.
 
-## モデル化したハードウェア状態 (ピン・タイマ・UART)
+## Modeled hardware state (pins, timers, UART)
 
-`Emu` は実行中に GPIO・タイマ・UART の状態を追跡し、実行後に読み出せる (ANALYSIS.md 15章)。
+`Emu` tracks the state of GPIO, timers, and UART during execution, and it can be read out afterward (ANALYSIS.md ch. 15).
 
-| API | 内容 |
+| API | Content |
 | --- | --- |
-| `e.pin('PA1')` | GPIO ピンの駆動レベル (0/1)。ODR/BSRR/BRR のシャドウ (Unicorn は BSRR→ODR の副作用を再現しないため必須)。**AF/タイマ出力ピンは反映されない** |
-| `e.pins()` | High に駆動中のピンの集合 |
-| `e.pin_mode('PC4')` | CRL/CRH から読むピンのモード (`'AIN'` / `'AF_PP_50'` / `'OUT_PP_50'` …)。Unicorn メモリを直接読むので正確 |
-| `e.heater_on` | TIM5 (CH2 = **PA1** ヒーターゲート) が有効か |
-| `e.heater_log` | ヒーターの ON/OFF 遷移 `(命令数, on)` の履歴 |
-| `e.buzzer_duty` / `e.backlight_duty` | TIM4_CH3 (PB8) / TIM1_CH1 (PA8) の比較値 |
-| `e.uart_tx[2]` / `e.uart_tx[4]` | ファームが USART2 (こて先リンク/治具) / UART4 に送ったバイト列 |
+| `e.pin('PA1')` | The drive level of the GPIO pin (0/1). A shadow of ODR/BSRR/BRR (essential because Unicorn does not reproduce the BSRR→ODR side effect). **AF / timer output pins are not reflected** |
+| `e.pins()` | The set of pins currently driven High |
+| `e.pin_mode('PC4')` | The pin mode read from CRL/CRH (`'AIN'` / `'AF_PP_50'` / `'OUT_PP_50'` …). Accurate because it reads Unicorn memory directly |
+| `e.heater_on` | Whether TIM5 (CH2 = **PA1** heater gate) is enabled |
+| `e.heater_log` | The history of heater ON/OFF transitions `(instruction count, on)` |
+| `e.buzzer_duty` / `e.backlight_duty` | The compare values of TIM4_CH3 (PB8) / TIM1_CH1 (PA8) |
+| `e.uart_tx[2]` / `e.uart_tx[4]` | The byte stream the firmware sent to USART2 (tip link/jig) / UART4 |
 
-追跡は GPIO/UART レジスタ範囲に**限定した**書き込みフック (7 章の全域フックは壊れるので範囲を絞る) と、タイマヘルパー (`TIM_Cmd` `0x08016A9E` / `TIM_CCxCmd` `0x08016C24` / `SetCompareN`) のコードフックで行う。
+Tracking is done with a write hook **limited** to the GPIO/UART register ranges (the whole-range hook in ch. 7 breaks it, so the range is narrowed) and code hooks on the timer helpers (`TIM_Cmd` `0x08016A9E` / `TIM_CCxCmd` `0x08016C24` / `SetCompareN`).
 
-> 注意: `_seed_peripherals` は以前 GPIO ベース (オフセット 0 = CRL) に `0xFFFFFFFF` を書いてピン設定を壊していた。GPIO には offset 0 に status レジスタが無いので、この seed は削除した (`pin_mode` が正しく読めるようになった)。
+> Note: `_seed_peripherals` previously wrote `0xFFFFFFFF` to the GPIO base (offset 0 = CRL), corrupting the pin configuration. GPIO has no status register at offset 0, so this seed was removed (`pin_mode` can now be read correctly).
 
-### 測定/加熱サイクルを回す (`sim_measure=True`)
+### Running the measurement/heat cycle (`sim_measure=True`)
 
-ヒーター (PA1/TIM5_CH2) は ADC 注入変換割り込み (ベクタ 34) が駆動する測定/加熱サイクルの中で ON/OFF する。
-Unicorn は割り込みを模擬しないため、通常はこのサイクルが進まず、メインループのエミュレーションでは PA1 が動かない
-(以前 PA1 を「idle」と誤認した原因)。
+The heater (PA1/TIM5_CH2) turns ON/OFF within a measurement/heat cycle driven by the ADC injected-conversion interrupt (vector 34).
+Because Unicorn does not simulate interrupts, this cycle normally does not advance, and in the main-loop emulation PA1 does not move
+(the cause of previously mistaking PA1 for "idle").
 
-`Emu(defaults=True, work_mode=True, sim_measure=True)` を指定すると、`run()` をスライス実行し、その合間に
-測定開始メソッド (`0x08012F3C`、ヒーター OFF) と測定終了メソッド (`0x08013A20`、ヒーター ON) を
-退避コンテキスト付きのネスト実行で呼ぶ。これにより TIM5/CH2 (PA1) が実機同様にトグルし、`heater_log` で観測できる。
+Specifying `Emu(defaults=True, work_mode=True, sim_measure=True)` runs `run()` in slices, and in between calls the
+measurement-start method (`0x08012F3C`, heater OFF) and the measurement-end method (`0x08013A20`, heater ON) in a
+nested execution with context save/restore. This makes TIM5/CH2 (PA1) toggle just like real hardware, observable via `heater_log`.
 
 ```
-python3 ts1m_emu.py --sim -q        # モデル化したピン/タイマ/ヒーター状態を表示
+python3 ts1m_emu.py --sim -q        # display the modeled pin/timer/heater state
 ```
 
-## 温度変数の特定 (測定点を分離)
+## Identifying the temperature variables (isolating measurement points)
 
-`Emu(force_tip=1, skip_res=True, defaults=True)` で、4つの測定点を**1つずつ**ランプさせた (他は 2000 固定)。
+With `Emu(force_tip=1, skip_res=True, defaults=True)`, the four measurement points were ramped **one at a time** (the others fixed at 2000).
 
-| ランプさせた測定点 | `0x2000023E` (現在温度) | その他 |
+| Ramped measurement point | `0x2000023E` (current temperature) | Others |
 | --- | --- | --- |
-| adc3 (ch10, mux 000) 606→3431 | 1485→6037 と単調に追従 | `0x20000402` (生値)、`0x20000404` (多項式の結果) も追従 |
-| ch12 605→3442 | 4253→3313 と逆向き | `0x200003FC` (生値) が追従、`0x20000400` (冷接点) が 90→8 (NTC) |
-| ch13 | 変化なし | |
-| ch0 | 変化なし | |
+| adc3 (ch10, mux 000) 606→3431 | follows monotonically 1485→6037 | `0x20000402` (raw value) and `0x20000404` (result of the polynomial) also follow |
+| ch12 605→3442 | inversely 4253→3313 | `0x200003FC` (raw value) follows, and `0x20000400` (cold junction) goes 90→8 (NTC) |
+| ch13 | no change | |
+| ch0 | no change | |
 
-- **現在温度 = `0x2000023E`**、目標温度 = `0x200001F4`、動作モード = `0x2000023C`
-  (詳細は ANALYSIS.md 10章)
-- 以前「誤り」とした `0x200003FC` / `0x20000402` / `0x20000404` は、正しい測定点を単独でランプさせると追従する。
-  ただしどれも生値か中間値で、制御に使われる現在温度ではない
-- 以前の推定 `0x20000244` (目標温度) / `0x20000914` (現在温度) は誤り。`0x20000914` は校正モード (CAL) のフラグ
+- **Current temperature = `0x2000023E`**, target temperature = `0x200001F4`, operating mode = `0x2000023C`
+  (details in ANALYSIS.md ch. 10)
+- `0x200003FC` / `0x20000402` / `0x20000404`, previously deemed "wrong", do follow when the correct measurement point is ramped alone.
+  However, they are all raw or intermediate values, not the current temperature used for control
+- The earlier inference of `0x20000244` (target temperature) / `0x20000914` (current temperature) is wrong. `0x20000914` is the calibration-mode (CAL) flag
 
-## 外部 SPI フラッシュ (`spi_flash`) と実際の設定読み込み
+## External SPI flash (`spi_flash`) and actual settings loading
 
-設定は外部 SPI フラッシュ (Winbond W25Q64、SPI2、CS=PB12) 上の FatFs ボリュームにある `TS1M.TXT` から読まれる
-(ANALYSIS.md 12章)。素のエミュレータではフラッシュが応答せず、ID チェック (`0x90` → `0xEF16`) → `f_mkfs` が失敗して
-設定は 0 のままだった。
+Settings are read from `TS1M.TXT` on a FatFs volume on the external SPI flash (Winbond W25Q64, SPI2, CS=PB12)
+(ANALYSIS.md ch. 12). On the bare emulator, the flash does not respond, the ID check (`0x90` → `0xEF16`) → `f_mkfs` fails, and
+the settings stay 0.
 
-`Emu(spi_flash=...)` で W25Q64 のモデルを付けると、ファーム自身がフォーマットし、初期値の TS1M.TXT を書き、
-次回以降はそれを読む (`Data Valid`)。`defaults=True` の代用処理が不要になり、設定経路そのものを確認できる。
+Attaching a W25Q64 model with `Emu(spi_flash=...)` lets the firmware itself format it, write the initial TS1M.TXT, and
+read it from then on (`Data Valid`). The substitute processing of `defaults=True` is no longer needed, and the settings path itself can be confirmed.
 
 ```
-python3 ts1m_emu.py --make-flash flash.bin     # フォーマット済みイメージを作る (FlipOver=0 に書き換え済み)
-python3 ts1m_emu.py --flash flash.bin -q       # そのイメージで起動
+python3 ts1m_emu.py --make-flash flash.bin     # make a formatted image (already rewritten with FlipOver=0)
+python3 ts1m_emu.py --flash flash.bin -q       # boot with that image
 ```
 
 ```python
 from ts1m_emu import Emu, edit_ts1m_txt
 img = open('flash.bin', 'rb').read()
-img = edit_ts1m_txt(img, TempType=1, WorkTemp1=572)   # 値の桁数は変えられない
+img = edit_ts1m_txt(img, TempType=1, WorkTemp1=572)   # the number of digits of a value cannot be changed
 e = Emu(spi_flash=img, force_tip=1, skip_res=True, work_mode=True).run(count=10_000_000)
 ```
 
-モデルの内容: `0x90` / `0x9F` / `0xAB` / `0x4B` (ID)、`0x05` (常に非ビジー)、`0x06` / `0x04`、`0x03` / `0x0B` (読み出し)、
-`0x02` (ページ書き込み)、`0x20` / `0x52` / `0xD8` / `0xC7` (消去)。SPI のデータレジスタ関数
-(`0x08015AEE` 送信 / `0x08015AEA` 受信) を SPI2 のときだけ横取りしている。
+Contents of the model: `0x90` / `0x9F` / `0xAB` / `0x4B` (ID), `0x05` (always non-busy), `0x06` / `0x04`, `0x03` / `0x0B` (read),
+`0x02` (page write), `0x20` / `0x52` / `0xD8` / `0xC7` (erase). It intercepts the SPI data register functions
+(`0x08015AEE` transmit / `0x08015AEA` receive) only when it is SPI2.
 
-関連して入れた対処:
+Related remedies put in place:
 
-| 事象 | 対処 |
+| Symptom | Remedy |
 | --- | --- |
-| 解析関数が読み込みバイト数をポインタとして扱い、ブートローダ領域 (アドレス ~0x500) から探索長を読む | `0x00000000`-`0x0000FFFF` (ブート領域のエイリアス) を割り当て、`0x06` で埋める (探索長 0x0606) |
-| 初期値の `FlipOver = 1` だと加速度センサーをブートローダ経由で読み、存在しないコードに飛ぶ | `make_flash_image()` がファイル中の値を 0 に書き換える |
-| 温度・電圧の校正レコードは内部フラッシュ (`0x08077C00` / `0x08077D00`) で HEX に含まれない | `spi_flash` 指定時も `defaults=True` と同じく中立な値を置く |
+| The parsing function treats the number of read bytes as a pointer and reads the search length from the bootloader region (address ~0x500) | Map `0x00000000`-`0x0000FFFF` (an alias of the boot region) and fill it with `0x06` (search length 0x0606) |
+| With the initial value `FlipOver = 1`, the accelerometer is read via the bootloader and it jumps to code that does not exist | `make_flash_image()` rewrites the value in the file to 0 |
+| The temperature/voltage calibration records are in internal flash (`0x08077C00` / `0x08077D00`) and are not included in the HEX | When `spi_flash` is specified too, place neutral values just like `defaults=True` |
 
-TS1M.TXT を書き換えて確認できたこと:
-- `TempType=1`: 設定・目標・現在温度が ℉×10 になる。CalibraVal=0 のままだと現在温度が約 4.9% 高く出る (ANALYSIS.md 12章)
-- `user_UI=1`: 起動時に `0x20000455` = 1 になり、加熱画面が 7セグ風 (Digit) で描画される
+What could be confirmed by rewriting TS1M.TXT:
+- `TempType=1`: settings, target, and current temperature become ℉×10. If CalibraVal stays 0, the current temperature comes out about 4.9% high (ANALYSIS.md ch. 12)
+- `user_UI=1`: at boot `0x20000455` = 1, and the heat screen is drawn in a 7-segment style (Digit)
 
-## 測定点の用途
+## Uses of the measurement points
 
-| 測定点 | 用途 | 追従するセル |
+| Measurement point | Use | Cell that follows |
 | --- | --- | --- |
-| ch10 (mux 000, adc3) | こて先熱電対 | `0x20000402` (生値) → `0x2000023E` (現在温度) |
-| ch12 | 冷接点 NTC | `0x200003FC` (生値)、`0x20000400` (冷接点温度) |
-| ch13 | 電源電圧 | `0x2000039C` (mV) |
-| ch0 | 外部熱電対 (TK) | `0x200008A4` (≒ ch0 × 1.17) |
+| ch10 (mux 000, adc3) | tip thermocouple | `0x20000402` (raw value) → `0x2000023E` (current temperature) |
+| ch12 | cold junction NTC | `0x200003FC` (raw value), `0x20000400` (cold junction temperature) |
+| ch13 | supply voltage | `0x2000039C` (mV) |
+| ch0 | external thermocouple (TK) | `0x200008A4` (≒ ch0 × 1.17) |
 
-## 未解決
+## Unresolved
 
-- HEX の行構造の影響はブートローダの処理なので調べられない
-- 外部熱電対の冷接点補償: ch12 を動かしても `0x200008A4` は変わらなかった
-- UI ページ 3 はグラフ画面の一部まで描画できたが、描画が遅く全体は未確認
+- The effect of the HEX line structure is bootloader processing, so it cannot be investigated
+- Cold junction compensation of the external thermocouple: moving ch12 did not change `0x200008A4`
+- UI page 3 could be drawn up to part of the graph screen, but drawing is slow and the whole thing has not been confirmed
 
-### 設定ロードの補足
+### Supplement on settings loading
 
-`0x08023644` (main の `0x080223BE` から `r0=0x08077E00, r1=0x200002F0, r2=1`) は 16bit 値を 1ワードだけ
-コピーする処理で、設定本体ではない。設定本体は上記の TS1M.TXT 経由で読まれる。
+`0x08023644` (from main's `0x080223BE` with `r0=0x08077E00, r1=0x200002F0, r2=1`) is a process that
+copies just one word of a 16-bit value, not the settings body. The settings body is read via TS1M.TXT as above.
 
-なお `0x200002F0` は描画用構造体ではなく、この 1ワードの受け先。
-以前ビープ関数と誤認した `0x0802796C` / `0x08027960` が触る `+6` / `+8` もこの構造体のフィールド。
+Note that `0x200002F0` is not a drawing struct but the destination of this one word.
+The `+6` / `+8` touched by `0x0802796C` / `0x08027960`, previously mistaken for beep functions, are also fields of this struct.

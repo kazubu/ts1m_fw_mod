@@ -1,213 +1,215 @@
-# MINIWARE TS1M ファームウェア解析メモ
+> Japanese version: [ANALYSIS.ja.md](ANALYSIS.ja.md)
 
-対象: `TS1MAPPV202.zip` (MINIWARE TS1M マルチファンクション ミニはんだごてステーション)
+# MINIWARE TS1M firmware analysis notes
 
-| 項目 | 内容 |
+Target: `TS1MAPPV202.zip` (MINIWARE TS1M multifunction mini soldering-iron station)
+
+| Item | Content |
 | --- | --- |
-| ファイル | `TS1M_Master_APP_V202_EN.hex` / `TS1M_Master_APP_V202_CN.hex` |
-| 形式 | Intel HEX (CRLF) |
-| 配置 | `0x08010000` 〜 `0x080773C4` (約413KB, 連続) |
+| File | `TS1M_Master_APP_V202_EN.hex` / `TS1M_Master_APP_V202_CN.hex` |
+| Format | Intel HEX (CRLF) |
+| Layout | `0x08010000`–`0x080773C4` (approx. 413KB, contiguous) |
 | SHA-256 (EN) | `90d6b724965644997839f23288bf36f9f610d0b714f0203fa8861440fa18881f` |
 | SHA-256 (CN) | `52b3dfab7078c302d4a8dce51d902f4d6b206c505708ba9ce4521a9edf78287f` |
-| 画面表示バージョン | `SWVer: 2.2` (Info 画面) |
+| On-screen version | `SWVer: 2.2` (Info screen) |
 
-EN と CN の差分は **1バイトのみ** (`0x0802A682`)。設定 `Language` の初期値が `0`(英語) か `1`(中国語) かの違いで、コードは完全に同一。
+The difference between EN and CN is **only 1 byte** (`0x0802A682`). It is only whether the initial value of the `Language` setting is `0` (English) or `1` (Chinese); the code is completely identical.
 
 ---
 
-## 1. MCU とビルド環境
+## 1. MCU and build environment
 
-**WCH CH32F208WBU6** (Cortex-M3、BLE 5.3 / 10M Ethernet 内蔵、QFN68)。
-**実機のチップ ID で確定** (2026-09-27): 診断パッチで読んだ `0x1FFFF704` = `0x2080043C`。
-公式 SDK の一覧の CH32F208WBU = `0x208004xC` に一致する (x = 3 がリビジョン)。
-コード中の SDK ドライバを WCH 公式 SDK ([openwch/ch32f20x](https://github.com/openwch/ch32f20x)) と突き合わせ、
-データシート (CH32F208 Datasheet V2.4) のピン配置と照合した。
+**WCH CH32F208WBU6** (Cortex-M3, with built-in BLE 5.3 / 10M Ethernet, QFN68).
+**Confirmed by the chip ID on the actual device** (2026-09-27): `0x1FFFF704` = `0x2080043C`, read by a diagnostic patch.
+It matches CH32F208WBU = `0x208004xC` in the official SDK's list (x = 3 is the revision).
+We cross-referenced the SDK drivers in the code against the WCH official SDK ([openwch/ch32f20x](https://github.com/openwch/ch32f20x)),
+and collated them with the pin layout in the datasheet (CH32F208 Datasheet V2.4).
 
-### 系列: CH32F20x (STM32F103 ではない)
+### Series: CH32F20x (not STM32F103)
 
-- USB ディスクリプタに `wch.cn` / `CH20xUDisk` / `WCH32` (UTF-16LE)。WCH の USB マスストレージ サンプルがほぼそのまま使われている
-- USB クロックのプリスケーラが 2bit (CFGR0 bit22-23)。`0x0801613C` で SystemCoreClock が 144/96/48MHz のどれかを見て
-  ÷3/÷2/÷1 を選ぶ (公式 `RCC_USBCLKConfig` と同じ)。STM32F103 は 1bit (÷1 / ÷1.5) で ÷3 が無い
-- クロック設定でフラッシュの待ちサイクル (FLASH_ACR) を設定しない。CH32 はゼロウェイト領域から実行するため不要
-- `0x40023800` (EXTEN_CTR) を使う: bit1 = USBD 内部プルアップ、bit4 = PLL の HSI 前段分周
-- フラッシュ制御レジスタ bit16/17 を使った 256バイト単位の高速消去は CH32 固有
+- USB descriptors contain `wch.cn` / `CH20xUDisk` / `WCH32` (UTF-16LE). WCH's USB mass storage sample is used almost verbatim
+- The USB clock prescaler is 2 bits (CFGR0 bit22-23). At `0x0801613C` it looks at whether SystemCoreClock is 144/96/48MHz and
+  selects ÷3/÷2/÷1 (same as the official `RCC_USBCLKConfig`). STM32F103 is 1 bit (÷1 / ÷1.5) and has no ÷3
+- The clock setup does not set the flash wait cycles (FLASH_ACR). CH32 runs from a zero-wait region, so this is unnecessary
+- It uses `0x40023800` (EXTEN_CTR): bit1 = USBD internal pull-up, bit4 = HSI pre-divide before the PLL
+- The 256-byte fast erase using flash control register bit16/17 is CH32-specific
 
-### 品種: D8W = CH32F208
+### Variant: D8W = CH32F208
 
-公式 SDK は品種を `CH32F20x_D6` (F203 小容量) / `D8` (F203 大容量) / `D8C` (F205/F207) / `D8W` (F208) で切り替える。
-ファームの `RCC_GetClocksFreq` (`0x0801592C`) は **D8W の分岐と完全に一致**する:
+The official SDK switches the variant with `CH32F20x_D6` (F203 small capacity) / `D8` (F203 large capacity) / `D8C` (F205/F207) / `D8W` (F208).
+The firmware's `RCC_GetClocksFreq` (`0x0801592C`) **matches the D8W branch exactly**:
 
-| 項目 | ファーム | 公式 SDK の D8W |
+| Item | Firmware | Official SDK D8W |
 | --- | --- | --- |
-| HSE を SYSCLK にしたときの周波数 | 32,000,000 | `HSE_VALUE = 32000000` (D8W のみ。他は 8MHz) |
-| PLL 入力 (HSE, XTPRE=0) | 8,000,000 | `HSE_VALUE >> 2` |
-| PLL 入力 (HSE, XTPRE=1) | 4,000,000 | `(HSE_VALUE >> 2) >> 1` |
-| PLL 入力 (CFGR0[23:22]=3) | 16,000,000 | `HSE_VALUE >> 1` (D8W 固有の分岐) |
-| PLL 倍率 | 値 17 → ×18 | D6 / D8 / D8W の扱い (D8C は別テーブル) |
+| Frequency when HSE is used as SYSCLK | 32,000,000 | `HSE_VALUE = 32000000` (D8W only. Others are 8MHz) |
+| PLL input (HSE, XTPRE=0) | 8,000,000 | `HSE_VALUE >> 2` |
+| PLL input (HSE, XTPRE=1) | 4,000,000 | `(HSE_VALUE >> 2) >> 1` |
+| PLL input (CFGR0[23:22]=3) | 16,000,000 | `HSE_VALUE >> 1` (D8W-specific branch) |
+| PLL multiplier | value 17 → ×18 | Handling for D6 / D8 / D8W (D8C is a separate table) |
 
-`SystemInit` (`0x08016870`) も公式と一致 (`CFGR0 &= 0xF0FF0000`、`INTR = 0x009F0000`、D8C 用の CFGR2 書き込み無し)。
-`SetSysClock` (`0x080160A0`) は公式の `SetSysClockTo96_HSE` と同じ命令列で、`HSE_STARTUP_TIMEOUT = 0x1000` まで一致する。
+`SystemInit` (`0x08016870`) also matches the official one (`CFGR0 &= 0xF0FF0000`, `INTR = 0x009F0000`, no CFGR2 write for D8C).
+`SetSysClock` (`0x080160A0`) has the same instruction sequence as the official `SetSysClockTo96_HSE`, matching down to `HSE_STARTUP_TIMEOUT = 0x1000`.
 
-**システムクロックは 96MHz** (HSE 32MHz ÷4 ×12)。APB1 = 48MHz、APB2 = 96MHz。
-以前「144MHz」と書いていたのは誤りで、144/96/48 は USB プリスケーラ選択の候補にすぎない。
-なお、エミュレータの UART 出力 `SystemClk:8000000` は RCC レジスタを `0xFFFFFFFF` で埋めているためで、実機の値ではない。
+**The system clock is 96MHz** (HSE 32MHz ÷4 ×12). APB1 = 48MHz, APB2 = 96MHz.
+Previously writing "144MHz" was an error; 144/96/48 are merely candidates for the USB prescaler selection.
+Note that the emulator's UART output `SystemClk:8000000` is because the RCC registers are filled with `0xFFFFFFFF`; it is not the value on the actual device.
 
-### パッケージ: QFN68 (CH32F208WBU6)
+### Package: QFN68 (CH32F208WBU6)
 
-CH32F208 には LQFP64 (RBT6) と QFN68 (WBU6) がある。**PD3 (66番ピン) と PD4 (18番ピン) は QFN68 にしか無い**。
-ファームは PD2 / PD3 / PD4 をこて先測定のアナログマルチプレクサ選択線として実際に駆動している (EMULATION.md) ので、
-QFN68 と判断した。
+The CH32F208 comes in LQFP64 (RBT6) and QFN68 (WBU6). **PD3 (pin 66) and PD4 (pin 18) exist only on QFN68.**
+The firmware actually drives PD2 / PD3 / PD4 as analog multiplexer select lines for tip measurement (EMULATION.md),
+so we judged it to be QFN68.
 
-### データシートとの整合
+### Consistency with the datasheet
 
-| 項目 | データシート (CH32F208) | ファーム |
+| Item | Datasheet (CH32F208) | Firmware |
 | --- | --- | --- |
-| フラッシュ | 合計 480KB (ゼロウェイト 128K + 非ゼロウェイト) | イメージは `0x080773C4` まで (480KB 以内) |
-| SRAM | 64KB (128K+64K / 144K+48K / 160K+32K から選択) | 初期 SP `0x2000CFC8` = 48KB を超えて使用 → 128K+64K 構成 |
-| 外部クリスタル | 32MHz (BLE 用) | `HSE_VALUE = 32000000` |
-| USB | USBD + USBHD | USBD (`0x40005C00`、パケットメモリ `0x40006000`) のみ使用 |
+| Flash | 480KB total (128K zero-wait + non-zero-wait) | Image goes up to `0x080773C4` (within 480KB) |
+| SRAM | 64KB (selectable from 128K+64K / 144K+48K / 160K+32K) | Uses beyond initial SP `0x2000CFC8` = exceeds 48KB → 128K+64K configuration |
+| External crystal | 32MHz (for BLE) | `HSE_VALUE = 32000000` |
+| USB | USBD + USBHD | Uses only USBD (`0x40005C00`, packet memory `0x40006000`) |
 
-BLE と Ethernet (PC6-PC9 が RXP/RXN/TXP/TXN) はファームから使われていない。
+BLE and Ethernet (PC6-PC9 as RXP/RXN/TXP/TXN) are not used by the firmware.
 
-**フラッシュ容量の注意**: データシートの品種比較表の「Flash 128K」は**ゼロウェイト実行領域 (R0WAIT) だけの値**
-(表の注記 1)。プログラムフラッシュ全体は 480KB で、残りは非ゼロウェイト領域 (データシート冒頭の特長一覧・メモリマップ)。
-ファームは実際に 128K 境界 (`0x08020000`) を越えた位置のコードを実行している
-(ヒーター制御 `0x080214A0`、パッチのフック `0x0802849C`。後者は実機で動作確認済み)。
-SRAM を 48KB 超使うので構成は 128K+64K と考えられ、`0x08020000` 以降のコードは非ゼロウェイト領域から実行されている。
+**Note on flash capacity**: "Flash 128K" in the datasheet's variant comparison table is **the value for the zero-wait execution region (R0WAIT) only**
+(table note 1). The whole program flash is 480KB, the rest being the non-zero-wait region (feature list and memory map at the top of the datasheet).
+The firmware actually executes code located beyond the 128K boundary (`0x08020000`)
+(heater control `0x080214A0`, patch hook `0x0802849C`. The latter is confirmed working on the actual device).
+Since it uses more than 48KB of SRAM the configuration is thought to be 128K+64K, and the code at and beyond `0x08020000` is executed from the non-zero-wait region.
 
-### 確度と残る可能性
+### Confidence and remaining possibilities
 
-| 主張 | 確度 | 根拠と限界 |
+| Claim | Confidence | Basis and limits |
 | --- | --- | --- |
-| WCH CH32F20x (Cortex-M3) | 確実 | Thumb-2 コード (RISC-V の CH32V は除外)、CH32 固有レジスタの使用、FLASH_ACR 未設定 |
-| 品種 F208 | 確定 (チップ ID) | チップ ID `0x2080043C`。静的解析では「SDK を D8W 設定でビルドしている」ことから推定していた。D8W ビルドを F203/F205/F207 で動かすと RCC_GetClocksFreq が実周波数の 1/4 を返し UART のボーレートが 4倍ずれる。これらは 32MHz クリスタルも使えない (PLL も範囲外) |
-| パッケージ QFN68 | 確定 (チップ ID) | チップ ID の上位 (`208004`) が WBU を示す。静的解析では、PD3 が無ければ adc1/adc2 が区別できず 245 こて先を判定できない。こて先判定が実機で動くことが裏付け。ただしマルチプレクサの解釈はエミュレーション由来 |
+| WCH CH32F20x (Cortex-M3) | Certain | Thumb-2 code (excludes the RISC-V CH32V), use of CH32-specific registers, FLASH_ACR unset |
+| Variant F208 | Confirmed (chip ID) | Chip ID `0x2080043C`. Static analysis had inferred it from "the SDK is built with the D8W setting". Running a D8W build on F203/F205/F207 makes RCC_GetClocksFreq return 1/4 of the real frequency and shifts the UART baud rate by 4×. These also cannot use a 32MHz crystal (PLL out of range too) |
+| Package QFN68 | Confirmed (chip ID) | The upper part of the chip ID (`208004`) indicates WBU. In static analysis, without PD3 adc1/adc2 could not be distinguished and the 245 tip could not be determined. Tip determination working on the actual device backs this up. However, the multiplexer interpretation comes from emulation |
 
-F208 に無いはずの周辺のアドレスがコード中に現れるが、いずれも実使用ではない:
-- `0x40005000` (UART5 の位置) は USB エンドポイントレジスタ `0x40005C00 + ep*4` を `+0xC00` 付きで参照するためのベース値
-- TIM8/9/10 (`0x40013400` / `0x40014C00` / `0x40015000`) はライブラリ関数の「TIMx が TIM1〜TIM10 のどれか」比較にだけ出てくる
+Addresses of peripherals that should not exist on the F208 appear in the code, but none are actually used:
+- `0x40005000` (the location of UART5) is a base value used to reference USB endpoint registers `0x40005C00 + ep*4` with a `+0xC00` offset
+- TIM8/9/10 (`0x40013400` / `0x40014C00` / `0x40015000`) appear only in a library function's "is TIMx one of TIM1–TIM10" comparison
 
-ファームはチップ ID (`0x1FFFF704`) もフラッシュ容量レジスタも読まないので、コードだけでは同一ダイの別型番・互換品は否定できなかった。
-そこでチップ ID を画面に表示する診断パッチ
-(`python3 patches/build.py -p chipid`、ホーム画面左上に 16進8桁で表示) を使う
-(公式 SDK の値: CH32F208WBU = `0x208004xC`、CH32F208RBT = `0x208104xC`) で実機の値を読み、
-`0x2080043C` (CH32F208WBU、リビジョン 3) を得た。上の静的解析による推定と一致する。
+The firmware reads neither the chip ID (`0x1FFFF704`) nor the flash capacity register, so from code alone a different part number on the same die or a compatible clone could not be ruled out.
+So we used a diagnostic patch that displays the chip ID on screen
+(`python3 patches/build.py -p chipid`, shown as 8 hex digits in the top-left of the home screen)
+(official SDK values: CH32F208WBU = `0x208004xC`, CH32F208RBT = `0x208104xC`), read the value on the actual device,
+and got `0x2080043C` (CH32F208WBU, revision 3). This agrees with the inference from static analysis above.
 
-周辺アクセスは STM32F1 StdPeriph 互換の WCH SDK。Keil (ARMCC) ビルド。
+Peripheral access uses the WCH SDK, which is STM32F1 StdPeriph compatible. Keil (ARMCC) build.
 
-## 2. メモリマップ
+## 2. Memory map
 
-| 範囲 | 内容 |
+| Range | Content |
 | --- | --- |
-| `0x08000000`-`0x0800FFFF` | ブートローダ (配布 HEX には**含まれない**。実機から吸い出した。13章) |
-| `0x0800FFF0` | 個体キー (UID 照合用) |
-| `0x08010000`-`0x08027FFF` | アプリ コード |
-| `0x08028000`-`0x080773C4` | フォント (4bpp AA)・画像・文字列 |
-| `0x08077D00` | 工場校正レコード |
-| `0x08077E00` | 16bit 値 1ワード (`0x200002F0` へコピー)。設定本体は外部 SPI フラッシュの TS1M.TXT (12章) |
+| `0x08000000`-`0x0800FFFF` | Bootloader (**not included** in the distributed HEX. Dumped from the actual device. ch. 13) |
+| `0x0800FFF0` | Per-device key (for UID matching) |
+| `0x08010000`-`0x08027FFF` | Application code |
+| `0x08028000`-`0x080773C4` | Fonts (4bpp AA), images, strings |
+| `0x08077D00` | Factory calibration record |
+| `0x08077E00` | 1 word of 16-bit value (copied to `0x200002F0`). The settings body is TS1M.TXT on the external SPI flash (ch. 12) |
 
-ベクタテーブル: SP=`0x2000CFC8`, Reset=`0x0801085D`, SysTick=`0x080165E9`。IRQ 54本。VTOR はコードで設定 (`0x0801520A`)。
+Vector table: SP=`0x2000CFC8`, Reset=`0x0801085D`, SysTick=`0x080165E9`. 54 IRQs. VTOR is set by code (`0x0801520A`).
 
-### コード領域内の空き
+### Free space within the code region
 
-**注意: 以前ここに挙げていた「0x00 パディング」は空きではなかった。**
-`0x0802AFC4` (669 B) は、`0x0801FA8C` が描画する 1bpp ビットマップ
-(`0x0802AF92` から 760 B = 80×76 px の枠のマスク) の内側のゼロ部分だった。
-ここにコードを置くと画面の一部が崩れる。`0x0802B958` / `0x0802DBA4` / `0x0802CDA8` も
-フォント・画像領域内のゼロの並びで、同じ理由で空きとは言えない (個別には未確認)。
+**Note: the "0x00 padding" listed here previously was not free space.**
+`0x0802AFC4` (669 B) was the zero interior of a 1bpp bitmap drawn by `0x0801FA8C`
+(760 B = an 80×76 px frame mask from `0x0802AF92`).
+Placing code here corrupts part of the screen. `0x0802B958` / `0x0802DBA4` / `0x0802CDA8` are also
+runs of zeros within the font/image region and for the same reason cannot be called free space (not individually verified).
 
-確実に使える場所:
+Places that can be used with certainty:
 
-| アドレス | サイズ | 根拠 |
+| Address | Size | Basis |
 | --- | --- | --- |
-| `0x0802849C`-`0x080285F7` | 348 B | 使われていない FatFs テスト関数 (`M0.TXT` / `Hello, World!`)。コード中に BL・リテラル・ADR の参照は無い。ただし設定オブジェクト (`0x200002D0`) の関数テーブル +0x10 (`0x200002E0`) にこの関数へのポインタがある (圧縮された初期化データから展開されるため、フラッシュ上のリテラル検索では見えない)。起動時の展開以外で読まれないこと (エミュレーション: 読み出しフック、全ページ)、アクセスする命令が無いこと (静的解析)、パッチが実機で動作していることから未使用と判断 |
+| `0x0802849C`-`0x080285F7` | 348 B | Unused FatFs test function (`M0.TXT` / `Hello, World!`). No BL, literal, or ADR reference to it in the code. However, the settings object's (`0x200002D0`) function table +0x10 (`0x200002E0`) has a pointer to this function (it is expanded from compressed initialization data, so it is not visible in a literal search on flash). Judged unused because it is not read outside expansion at startup (emulation: read hook, all pages), no instruction accesses it (static analysis), and the patch works on the actual device |
 
-RAM の空き:
+Free RAM:
 
-| アドレス | サイズ | 根拠 |
+| Address | Size | Basis |
 | --- | --- | --- |
-| `0x2000BDC8`-`0x2000BFC7` | 512 B | ヒープ (`__user_initial_stackheap` = `0x08010878`)。malloc を使うコードが見当たらず、エミュレーションでも全域ゼロのまま。パッチの状態置き場として実機で使用中 |
+| `0x2000BDC8`-`0x2000BFC7` | 512 B | Heap (`__user_initial_stackheap` = `0x08010878`). No code using malloc is found, and it stays all-zero in emulation. Currently used as the patch's state storage on the actual device |
 
-スタックは `0x2000BFC8`-`0x2000CFC8` (4 KB)。RAM は電源投入時にゼロクリアされないので、
-ヒープ上に状態を置く場合は自前で初期化判定 (マジック値) が必要。
+The stack is `0x2000BFC8`-`0x2000CFC8` (4 KB). RAM is not zero-cleared at power-on, so
+if you place state on the heap you need your own initialization check (magic value).
 
-## 3. 主要な関数・アドレス
+## 3. Key functions / addresses
 
-### 確定 (実機で検証済み、または複数の根拠あり)
+### Confirmed (verified on the actual device, or with multiple bases)
 
-| アドレス | 内容 |
+| Address | Content |
 | --- | --- |
-| `0x080165E8` | SysTick ハンドラ。**フック実績あり** |
-| `0x080214A0` | ヒーター / PID 制御。**メインループから毎周呼ばれることをエミュレーションで確認** |
-| `0x0801EAA4` | 入力 / スリープ処理 |
-| `0x08022098` | こて先判定 |
-| `0x080199A8` | ADC 分類 |
-| `0x08022944` | 描画 |
-| `0x0801D638` | 工場検査モード |
-| `0x0801759C` | UID 照合 |
-| `0x08011EC8` | ADC サンプル取得 (r0 = チャンネル) |
-| `0x080140B8` | GPIO BRR (ピンを Low) |
-| `0x080140BC` | GPIO BSRR (ピンを High) |
-| `0x0801E99C` | USART1 putchar (`0x0801E9AE` で r4 を DR へ) |
-| `0x0801EE10` | 温度計算 (r0 = ironType)。`0x200003F4` の関数テーブル +4 から呼ばれる。10章参照 |
-| `0x08015494` | PID (r0 = 現在温度)。目標は `[0x200001F4]` から読む。`0x20000234` の関数ポインタ経由で呼ばれる |
-| `0x0801EB58` | スタンド / スリープの状態機械。`0x2000023C` (動作モード) を書き換える |
-| `0x08011DC8` | ADC1_2 割り込み (ベクタ 34)。ヒーター停止中の測定窓を管理 |
-| `0x08012218` | **ビープ `beep(pattern)`**。ブザーオブジェクト `0x20000330` の +4。10章参照 |
-| `0x08013A40` | 認証結果の処理 (r0: 0=`Demo Mode` 停止, 1=時刻を記録して戻る(正常), 2=Demo 3秒→3, 3=`Not e-Design Product!` 停止) |
+| `0x080165E8` | SysTick handler. **Hook confirmed** |
+| `0x080214A0` | Heater / PID control. **Confirmed by emulation to be called every cycle from the main loop** |
+| `0x0801EAA4` | Input / sleep processing |
+| `0x08022098` | Tip determination |
+| `0x080199A8` | ADC classification |
+| `0x08022944` | Drawing |
+| `0x0801D638` | Factory inspection mode |
+| `0x0801759C` | UID matching |
+| `0x08011EC8` | ADC sample acquisition (r0 = channel) |
+| `0x080140B8` | GPIO BRR (drive pin Low) |
+| `0x080140BC` | GPIO BSRR (drive pin High) |
+| `0x0801E99C` | USART1 putchar (r4 to DR at `0x0801E9AE`) |
+| `0x0801EE10` | Temperature calculation (r0 = ironType). Called via function table +4 at `0x200003F4`. See ch. 10 |
+| `0x08015494` | PID (r0 = current temperature). Reads target from `[0x200001F4]`. Called via the function pointer at `0x20000234` |
+| `0x0801EB58` | Stand / sleep state machine. Rewrites `0x2000023C` (operating mode) |
+| `0x08011DC8` | ADC1_2 interrupt (vector 34). Manages the measurement window while the heater is off |
+| `0x08012218` | **Beep `beep(pattern)`**. +4 of the buzzer object `0x20000330`. See ch. 10 |
+| `0x08013A40` | Authentication result handling (r0: 0=`Demo Mode` stop, 1=record time and return (normal), 2=Demo 3s→3, 3=`Not e-Design Product!` stop) |
 | `0x0801424C` | `get_ms()` = `[0x200003BC]` |
-| `0x08023644` | 設定ロード (フラッシュから16bitコピー、検証なし) |
-| `0x080193B8` | 熱電対処理 (内部で ADC は読まない) |
-| `0x08016DFC` | `TIMx->CCR3 = r1` (オフセット `0x3C`) |
-| `0x08014B70` | ブザー再生エンジン。TIM4 (`0x40000800`) CH3 PWM |
-| `0x0802A7DC` | 音量テーブル `0,50,100,150,200,250` (u16)。`BeepVolume` で索引 |
-| `0x08014834` | 文字列描画 (本体) |
-| `0x080108B4` | sprintf 相当 |
-| `0x08014DA4` | 矩形描画等 |
-| `0x0801FDDC` | 文字列 `POW` の 'P'。**1バイト書き換えで画面反映を確認済み** |
-| `0x08031394` | 表示ラベル `LowVol` (多言語テーブル内)。**書き換え反映を確認済み** |
-| `0x0802A688` | 設定キー名 `LowVolProtect` (`TS1M.TXT` 用、画面には出ない) |
-| `0x200003BC` | ミリ秒カウンタ |
-| `0x2000023C` | 動作モード (u8)。1=作業, 2=スリープ, 0/3=ヒーター停止 (エミュレーション) |
-| `0x2000023E` | **現在温度** (s16, 0.1℃)。10章参照 (エミュレーション) |
-| `0x200001F4` | **PID の目標温度** (s16, 0.1℃)。ヒーター制御が毎周設定値から書き直す (エミュレーション) |
-| `0x20000330` | ブザーオブジェクト。10章参照 (エミュレーション) |
-| `0x200015A4` | **設定構造体の先頭** (ポインタではない。99箇所すべてオフセット付きアクセス) |
-| `0x200002F0` | 設定ロードの受け先 |
+| `0x08023644` | Settings load (16-bit copy from flash, no validation) |
+| `0x080193B8` | Thermocouple processing (does not read the ADC internally) |
+| `0x08016DFC` | `TIMx->CCR3 = r1` (offset `0x3C`) |
+| `0x08014B70` | Buzzer playback engine. TIM4 (`0x40000800`) CH3 PWM |
+| `0x0802A7DC` | Volume table `0,50,100,150,200,250` (u16). Indexed by `BeepVolume` |
+| `0x08014834` | String drawing (core) |
+| `0x080108B4` | sprintf equivalent |
+| `0x08014DA4` | Rectangle drawing etc. |
+| `0x0801FDDC` | The 'P' of the string `POW`. **Confirmed reflected on screen by a 1-byte rewrite** |
+| `0x08031394` | Display label `LowVol` (in the multilingual table). **Confirmed a rewrite is reflected** |
+| `0x0802A688` | Settings key name `LowVolProtect` (for `TS1M.TXT`, not shown on screen) |
+| `0x200003BC` | Millisecond counter |
+| `0x2000023C` | Operating mode (u8). 1=working, 2=sleep, 0/3=heater stopped (emulation) |
+| `0x2000023E` | **Current temperature** (s16, 0.1℃). See ch. 10 (emulation) |
+| `0x200001F4` | **PID target temperature** (s16, 0.1℃). The heater control rewrites it from the setting every cycle (emulation) |
+| `0x20000330` | Buzzer object. See ch. 10 (emulation) |
+| `0x200015A4` | **Head of the settings struct** (not a pointer. All 99 accesses are offset-based) |
+| `0x200002F0` | Destination of the settings load |
 
-### 誤りだった推定 (記録として)
+### Inferences that were wrong (kept for the record)
 
-| アドレス | かつての推定 | 実際 |
+| Address | Former inference | Actual |
 | --- | --- | --- |
-| `0x0802796C` / `0x08027960` | ビープ関数 | 描画位置の設定。直前に必ず描画関数を呼び、座標値を渡している |
-| `0x20000244` | 目標温度 | 実機で否定。完全起動後も 0 のまま |
-| `0x20000914` | 現在温度 | 実機で否定。実際は校正モード (CAL) のフラグ (12章) |
-| `0x200002F0` | 描画用構造体 | 設定のロード先 |
-| `0x0802AFC4` | 669 B の空きパディング | 1bpp ビットマップ (`0x0802AF92`, 760 B) の内側 |
-| `0x08013A40` | `Demo Mode` 表示 + 停止 | r0 で分岐する認証結果処理。r0=1 は正常系で毎周呼ばれ得る |
+| `0x0802796C` / `0x08027960` | Beep function | Sets the drawing position. Always calls a drawing function immediately before, passing coordinate values |
+| `0x20000244` | Target temperature | Refuted on the actual device. Stays 0 even after full boot |
+| `0x20000914` | Current temperature | Refuted on the actual device. Actually the calibration-mode (CAL) flag (ch. 12) |
+| `0x200002F0` | Drawing struct | Load destination of the settings |
+| `0x0802AFC4` | 669 B of free padding | Interior of a 1bpp bitmap (`0x0802AF92`, 760 B) |
+| `0x08013A40` | `Demo Mode` display + stop | Authentication result handling that branches on r0. r0=1 is the normal path and can be called every cycle |
 
-### 未確定
+### Undetermined
 
-- (ch13 = 電源電圧、ch0 = 外部熱電対 TK と判明。12章)
+- (ch13 = supply voltage, ch0 = external thermocouple TK, now known. ch. 12)
 
-RAM のリテラル参照は 189 箇所。主なクラスタ:
+RAM literal references number 189. Main clusters:
 `0x20000000`-`0x200001F4`, `0x200002D0`-`0x20000461`, `0x200007FC`-`0x2000099C`, `0x20000A9C`-`0x200011A4`
 
-## 4. 設定項目 (全33件)
+## 4. Settings items (33 total)
 
-`TS1M.TXT` のキー名テーブルは `0x0802A4E6` から 22バイト間隔。各エントリは名前(16B) + 初期値/最小/最大 (u16×3)。
+The `TS1M.TXT` key name table starts at `0x0802A4E6` at 22-byte intervals. Each entry is name (16B) + initial/min/max (u16×3).
 
-設定構造体のベースは `0x200015A4` で、**これはポインタではなく構造体そのものの先頭**
-(コード中99箇所すべてがオフセット付きアクセス、ポインタ参照は0箇所)。
-フィールドのオフセットは `0x10 + 22*index` なので、絶対アドレスは単純な足し算で求まる。
-`BoostTemp` の `0x68` が実コードの `[r2, #0x68]` と一致することで検算済み。
+The base of the settings struct is `0x200015A4`, and **this is not a pointer but the head of the struct itself**
+(all 99 places in the code are offset-based access, zero pointer dereferences).
+The field offset is `0x10 + 22*index`, so absolute addresses are obtained by simple addition.
+Verified by `BoostTemp`'s `0x68` matching the actual code's `[r2, #0x68]`.
 
-主なアドレス: WorkTemp1 `0x200015CA` / WorkTemp2 `0x200015E0` / WorkTemp3 `0x200015F6` /
+Main addresses: WorkTemp1 `0x200015CA` / WorkTemp2 `0x200015E0` / WorkTemp3 `0x200015F6` /
 BoostTemp `0x2000160C` / SleepTemp `0x200016A6` / StepVal `0x200016E8` / BeepVolume `0x2000172A`
 
-設定の実体は外部 SPI フラッシュ上の `TS1M.TXT` で、起動時に解析されて構造体に入る (12章)。それまではゼロ。
+The settings body is `TS1M.TXT` on the external SPI flash, parsed at startup into the struct (ch. 12). Until then it is zero.
 
-| # | キー | offset |
+| # | Key | offset |
 | --- | --- | --- |
 | 0 | DefaultTemp | `0x10` |
 | 1 | WorkTemp1 | `0x26` |
@@ -230,352 +232,352 @@ BoostTemp `0x2000160C` / SleepTemp `0x200016A6` / StepVal `0x200016E8` / BeepVol
 | 27-31 | CalibraVal_245 / _210 / _115 / _100 / _80P | |
 | 32 | TS1M_APP | `0x2D0` |
 
-温度の範囲は 100.0〜450.0℃ (内部値は 0.1℃単位と推定)。`MaxPow_245` は 30〜200W (初期値 140W)。`LowVolProtect` は 6〜21V。
+The temperature range is 100.0–450.0℃ (internal value inferred to be in 0.1℃ units). `MaxPow_245` is 30–200W (initial value 140W). `LowVolProtect` is 6–21V.
 
-## 5. こて先判定ロジック
+## 5. Tip determination logic
 
-### 種類コード (`ironType` = `0x200003D3`)
+### Type code (`ironType` = `0x200003D3`)
 
-| 値 | こて先 |
+| Value | Tip |
 | --- | --- |
-| 0 | なし |
+| 0 | None |
 | 1 | 245 |
 | 2 | 210 |
 | 3 | 115 |
-| 4 | TS80P (**このバージョンでは到達不能**) |
+| 4 | TS80P (**unreachable in this version**) |
 | 5 | H100 |
-| 0x0F / 0xF0 / 0xFF | 判定中の中間状態 |
+| 0x0F / 0xF0 / 0xFF | Intermediate states during determination |
 
-表示名テーブルは `0x0805F568` 以降 (`(空)`, `H100`, `210`, `115`, `245`, `TS80P`)。
+The display name table is at and after `0x0805F568` (`(empty)`, `H100`, `210`, `115`, `245`, `TS80P`).
 
-### 判定フロー (関数 `0x080199A8`)
+### Determination flow (function `0x080199A8`)
 
-アナログスイッチで経路を切り替え、2点ずつ ADC 測定 (各10回平均)。
-`A = adc2-adc1`, `B = adc4-adc3` として分類:
+An analog switch switches paths, and the ADC is measured at 2 points each (average of 10 each).
+Classify with `A = adc2-adc1`, `B = adc4-adc3`:
 
-| UART | コード | 条件 |
+| UART | Code | Condition |
 | --- | --- | --- |
-| なし | `0x01` (245) | A=420〜1000, B<50, 再測定 ADC ≤ 3800 |
-| なし | `0xF0` (210/115) | A=40〜1000, B=50〜260 |
-| なし | `0xFF` | B ≥ 270 |
-| あり | `0x0F`→`5` (H100) | B=50〜440 かつ UART フレーム[2]==1 |
-| — | `0` | 上記以外 |
+| None | `0x01` (245) | A=420–1000, B<50, re-measured ADC ≤ 3800 |
+| None | `0xF0` (210/115) | A=40–1000, B=50–260 |
+| None | `0xFF` | B ≥ 270 |
+| Yes | `0x0F`→`5` (H100) | B=50–440 and UART frame[2]==1 |
+| — | `0` | Anything else |
 
-- 同一判定が **1000ms 継続**で確定
-- UART が 200ms 途絶で即 `0` に戻し、GPIOD Pin4 を落とす
-- **210 と 115 は電気的に区別しない**。メニュー `TipTyp` で手動選択 (カーソル0→210, 1→115)
-- `0xFF` は手動選択の対象外 = 加熱されない
+- The same determination **continuing for 1000ms** confirms it
+- If UART drops out for 200ms, it immediately reverts to `0` and drops GPIOD Pin4
+- **210 and 115 are not distinguished electrically.** Selected manually with the menu `TipTyp` (cursor 0→210, 1→115)
+- `0xFF` is not eligible for manual selection = not heated
 
-エミュレータ (Unicorn) で A=0〜1300 × B=0〜4000 を全走査して上表を確認。`ironType` への書き込みは全11箇所あるが、**値 4 を書く経路は存在しない**。
+The emulator (Unicorn) swept A=0–1300 × B=0–4000 exhaustively to confirm the table above. There are 11 places in all that write `ironType`, but **no path writes the value 4**.
 
-### 確定後の安全チェック
+### Safety checks after confirmation
 
-- 抵抗値チェック (`0x08022490`): 範囲外 (1000〜12000) なら判定取消・加熱停止。ログ `ResValTmp`
-- 過熱保護 (`hot_ADC`): 245=3700, 210=3000, 115=2900, TS80P=4000, H100=2800
-- 電力係数: 245/210/TS80P=0.30, 115=0.43, H100=0.03
+- Resistance check (`0x08022490`): if out of range (1000–12000) the determination is canceled and heating stopped. Log `ResValTmp`
+- Overheat protection (`hot_ADC`): 245=3700, 210=3000, 115=2900, TS80P=4000, H100=2800
+- Power coefficient: 245/210/TS80P=0.30, 115=0.43, H100=0.03
 
-### スリープ検出
+### Sleep detection
 
-- アナログハンドル: **GPIOC Pin6 のみ**。Low が 500ms 継続でスリープ、High 復帰で作業状態
-- H100: UART フレーム[8] (動き検知) を使用。`SleepTime` 秒で無動作判定
-- ハンドル側スイッチ用の入力は**存在しない**
+- Analog handle: **GPIOC Pin6 only**. Low continuing for 500ms → sleep, High recovery → working state
+- H100: uses UART frame[8] (motion detection). No-motion is judged after `SleepTime` seconds
+- There is **no input** for a handle-side switch
 
-## 6. 隠し機能・未使用コード
+## 6. Hidden features / unused code
 
-### 工場検査モード (checkMode)
+### Factory inspection mode (checkMode)
 
-起動時に `0x08077D00` の工場校正レコード (u16×10 + 合計チェックサム) を読み、**壊れていれば自動的に工場モードへ**。ボタン操作では入れない。
+At startup it reads the factory calibration record at `0x08077D00` (u16×10 + a total checksum), and **if it is corrupt it automatically enters factory mode**. It cannot be entered by button operation.
 
-検査項目: 加速度センサー, 電流・リレー, 210/80/245 の AD ゼロ点と抵抗値, 熱電対, スタンド検出, 電流・電圧校正。
-UART2 に治具用ハンドシェイク (`A1 1A` → `A2 2A` → `A5 5A`)。
+Inspection items: accelerometer, current/relay, AD zero point and resistance for 210/80/245, thermocouple, stand detection, current/voltage calibration.
+A jig handshake on UART2 (`A1 1A` → `A2 2A` → `A5 5A`).
 
-### 未使用コード
+### Unused code
 
-- FatFs テスト関数 (`M0.TXT` に "Hello, World!" を書く)。設定オブジェクトの関数テーブル (+0x10) にポインタだけが残っているが、呼ばれない (2章参照)
-- 処理時間計測 printf (`1111111111:%dms` 等)、PID・ADC デバッグ出力が多数残存
+- FatFs test function (writes "Hello, World!" to `M0.TXT`). Only a pointer remains in the settings object's function table (+0x10), but it is not called (see ch. 2)
+- Processing-time measurement printf (`1111111111:%dms` etc.), and many PID/ADC debug outputs remain
 
-### 設定メニューの隠し項目
+### Hidden items in the settings menu
 
-設定メニューは項目オブジェクト (`0x20000594` から 28バイトずつ、+20 = 前、+24 = 次) を輪につないだもので、
-項目番号は設定の番号と一致する。**項目 4〜10 は輪につながっておらず、メニューに出てこない** (エミュレーションで確認)。
-輪をつなぎ替えて仮想パネルに描画すると、次のように表示された:
+The settings menu is a ring of item objects (`0x20000594`, 28 bytes each, +20 = previous, +24 = next),
+where the item number matches the settings number. **Items 4–10 are not linked into the ring and do not appear in the menu** (confirmed by emulation).
+By relinking the ring and drawing to the virtual panel, they displayed as follows:
 
-| 項目 | メニュー表示 | 設定キー | 初期値の表示 |
+| Item | Menu display | Settings key | Displayed initial value |
 | --- | --- | --- | --- |
 | 4 | `QkTmp` | BoostTemp | 400℃ |
 | 5 | `RGB FX` | colorEffect | Star |
 | 6 | `RGB Mode` | colorMode | Man. |
 | 7 | `RGB Bright` | colorBright | -- |
-| 8〜10 | `Red` / `Green` / `Blue` | colorR / colorG / colorB | 255 |
+| 8–10 | `Red` / `Green` / `Blue` | colorR / colorG / colorB | 255 |
 
-- エフェクト名は多言語テーブルに `1 Star (流星)`、`2 Breath (呼吸)`、モードは `Auto` / `Man.` がある
-- RGB の各値を読むのは、メニューの表示・編集、TS1M.TXT の読み書きだけ (`skipdata` 付きの全コード走査で確認)。
-  **LED を駆動する処理は見当たらない**。RGB 照明を持つ別機種 (または計画) の名残と思われる
-- BoostTemp (QkTmp) はメニューからは消えているが、加熱画面のキー処理で使われている。キーイベント 3 で現在の目標を退避して
-  BoostTemp に切り替え (SET 表示と操作音)、イベント 5 で元に戻す (`0x08020534` / `0x0802054C`)。本体の手動ブースト機能と思われる。
-  どのボタン操作がイベント 3 / 5 にあたるかは未確認。値は TS1M.TXT の `BoostTemp` で変更できる
+- The multilingual table has effect names `1 Star (流星)`, `2 Breath (呼吸)`, and modes `Auto` / `Man.`
+- The RGB values are read only for menu display/editing and TS1M.TXT read/write (confirmed by a full code sweep with `skipdata`).
+  **No processing that drives an LED is found.** It is thought to be a remnant of another model (or a plan) that has RGB lighting
+- BoostTemp (QkTmp) is removed from the menu but is used in the heating-screen key handling. On key event 3, it saves the current target and
+  switches to BoostTemp (SET display and operation sound); on event 5 it restores it (`0x08020534` / `0x0802054C`). Thought to be the device's manual boost feature.
+  Which button operation corresponds to event 3 / 5 is not verified. The value can be changed via `BoostTemp` in TS1M.TXT
 
-### 認証・保護
+### Authentication / protection
 
-- 起動時にチップ UID (`0x1FFFF7E8`, 12B) を読み、`0x0800FFF0` の保存値と照合。各32bitワードを `0x0800FFF0` で XOR した形式。不一致で `Demo Mode` 表示して停止
-- 外部デバイス認証に失敗すると `Not e-Design Product!` 表示で停止。判定材料はブートローダ側 (`0x08002001` を直接呼ぶ)
+- At startup it reads the chip UID (`0x1FFFF7E8`, 12B) and matches it against the saved value at `0x0800FFF0`. Each 32-bit word is in a form XORed with `0x0800FFF0`. On mismatch it shows `Demo Mode` and stops
+- If external device authentication fails it shows `Not e-Design Product!` and stops. The decision material is on the bootloader side (it calls `0x08002001` directly)
 
-## 7. DFU 書き込みについて
+## 7. About DFU programming
 
-**書き込み方法**: 本体を USB マスストレージにして HEX をコピー。
+**Programming method**: put the device into USB mass storage and copy the HEX.
 
-### 確認できたこと
+### What was confirmed
 
-- **コード領域・文字列領域ともに書き込みは反映される**
-  - `0x0801FDDC` (コード領域内の文字列 `POW`) の 1バイト書き換えが画面に反映された
-  - `0x08031394` (多言語ラベル `LowVol`) の 1バイト書き換えが画面に反映された
-- SysTick にフックを仕込んだ版で起動ロゴフリーズを再現できたので、**コード領域のパッチも実行される**
-- ファイル名は無関係 (`V202` のままでも `V203` にしても挙動は同じ)
+- **Writes are reflected in both the code region and the string region**
+  - A 1-byte rewrite of `0x0801FDDC` (the string `POW` within the code region) was reflected on screen
+  - A 1-byte rewrite of `0x08031394` (the multilingual label `LowVol`) was reflected on screen
+- A version with a hook installed on SysTick could reproduce a boot-logo freeze, so **patches to the code region are executed too**
+- The file name is irrelevant (behavior is the same whether left as `V202` or renamed to `V203`)
 
-### 未確定: HEX の行構造の影響
+### Undetermined: the effect of HEX line structure
 
-解析の初期に、HEX 全体をアドレス順に再シリアライズして出力したパッチ (行数 26438 → 26456) が反映されず、
-元ファイルの該当行だけを差し替えた版 (行数維持) は反映された、という観測があった。
-このことから「行構造を保つ必要がある」と考えていたが、**この因果関係は確認できていない**。
+Early in the analysis, there was an observation that a patch that re-serialized the whole HEX in address order (line count 26438 → 26456) was not reflected,
+whereas a version that replaced only the relevant lines of the original file (line count preserved) was reflected.
+From this we thought "the line structure must be preserved", but **this causal relationship was not confirmed.**
 
-理由: 両者は変更内容も異なっていた (前者は detour + フック、後者は文字列 1バイト)。
-また後の検証で、当時「反映されていない」と判断していた版の多くは、実際にはフックが動作しており、
-**ビープ関数や温度変数の推定が誤っていたために何も起きていなかっただけ**と判明した。
-つまり再シリアライズ版も、書き込み自体は成功していた可能性がある。
+Reason: the two also differed in their change content (the former was a detour + hook, the latter a 1-byte string).
+Also, later verification found that many versions judged "not reflected" at the time actually had a working hook, and
+**nothing happened simply because the beep function and temperature variable inferences were wrong**.
+In other words, the re-serialized version too may have written successfully.
 
-**決着 (14章)**: ブートローダの HEX 検査パス (`0x08003064`) が、行長 `13 + 2·LL` 不一致 (err 0x02) と CR+LF 欠落 (err 0x07) を拒否する。
-つまり**行構造は書き込み可否に影響する**。再シリアライズで行長・レコード分割・改行が変わると CHECK で弾かれる。
-「元 HEX の該当行だけを書き換え、行数と構造を保つ」方式が正しい。
+**Resolution (ch. 14)**: the bootloader's HEX inspection pass (`0x08003064`) rejects line-length mismatch of `13 + 2·LL` (err 0x02) and missing CR+LF (err 0x07).
+So **the line structure does affect whether writing succeeds**. If re-serialization changes line length, record splitting, or line endings, CHECK rejects it.
+The "rewrite only the relevant lines of the original HEX, preserving line count and structure" method is correct.
 
-### フォントのサブセット
+### Font subset
 
-フォントは UI に登場する文字だけを持つ。`POW` の `P` を `Q` に変えたところ、グリフが無く空白描画になり
-`OW:` と表示された。文字列書き換えで検証する際は、**元の UI に出現する文字**を使うこと。
+The font holds only the characters that appear in the UI. Changing `P` of `POW` to `Q` produced no glyph, drew a blank, and displayed
+`OW:`. When verifying by string rewrite, **use characters that appear in the original UI**.
 
-## 8. 検証済みのパッチ手法
+## 8. Verified patch methods
 
-SysTick ハンドラ (`0x080165E8`) の先頭 4バイトを `b.w <hook>` に置換し、フック本体を別の場所に置く方式が
-**動作することを実機で確認済み** (フック内で無限ループさせたら起動ロゴでフリーズした)。
+The method of replacing the first 4 bytes of the SysTick handler (`0x080165E8`) with `b.w <hook>` and placing the hook body elsewhere
+was **confirmed working on the actual device** (an infinite loop inside the hook froze at the boot logo).
 
-ただし当時フック本体を置いた `0x0802AFC4` は、空きではなくビットマップの内側だった (2章参照)。
-コードは実行されるので判定には影響しないが、画面の一部が崩れていたはず。
-今後は `0x0802849C` (未使用の FatFs テスト関数) を使う。
+However, `0x0802AFC4` where the hook body was placed at the time was not free space but the interior of a bitmap (see ch. 2).
+The code runs so it does not affect the determination, but part of the screen must have been corrupted.
+Going forward, use `0x0802849C` (the unused FatFs test function).
 
-ヒーター制御関数 `0x080214A0` もメインループから毎周呼ばれることをエミュレーションで確認済み。
-以前これをフックした改造が動かなかったのは、フック先ではなく**ビープ関数と温度変数の推定が誤っていたため**。
+The heater control function `0x080214A0` was also confirmed by emulation to be called every cycle from the main loop.
+The earlier modification that hooked it did not work not because of the hook target but **because the beep function and temperature variable inferences were wrong**.
 
-## 9. 課題の状況
+## 9. Status of open items
 
-### 未解決 (実機確認や追加解析が必要)
+### Unresolved (needs verification on the actual device or additional analysis)
 
-1. 華氏モードで CalibraVal が絶対温度として換算される件 (12章)。実機での確認が必要
-2. TS80P が無効化されている理由 (12章。コードは残っているが到達不能)
-3. 外部熱電対 (TK) の冷接点補償の有無。ch12 を動かしても TK 値は変わらなかった
-4. UI ページ 3 の内容 (グラフ画面の一部までは描画できたが、全体はエミュレーションが遅く未確認)
-5. IDChip (PB11 の 1-Wire EEPROM) の正確な品種、およびこて先 (iron) 更新プロトコル (USART2、14章で概略のみ)
-6. ブートローダ側が PC4 を出力駆動する用途 (アプリ側は ADC1_IN14 と確定。物理ネットはアプリの ADC センス、15章)
-7. UART4 (PC11) が本来何を受ける想定だったか (9600 RX 専用だが ISR 無し・未使用。別バリアント/ドック用の名残か、15章)
-8. RGB 照明: 設定に colorR/G/B・FX・Mode・Bright があるのに **RGB LED を駆動するコードが見つからない** (6章)。LED が載っているのか、どのピン/ドライバかも不明 (バックライト PA8/TIM1 とは別)
-9. 加速度センサー (LIS3DH 系、I2C 0x19) の活用ロジック。バス・レジスタ設定は判明したが、FlipOver / 動き検知が**どの軸・しきい値でスリープ解除やフリップ判定をするか**は未トレース
-10. アプリ側の USB 利用有無。USB (`0x40005C00`) はアプリにもクロック供給されるが、アプリが USB ドライブ/通信を出すのか未確認 (DFU はブートローダのみ)
-11. PB10 (出力) と PB1 / TIM3_CH4 (100kHz PWM だが常時 0%) の本来の用途、PC1 (ADC IN11、電流センス?) の実使用 — いずれも設定のみで用途未確定 (15章)
-12. 工場検査モード (checkMode) の各検査項目と使用ピン (電流・リレーセンス等) の詳細 (6章)
-13. こて先 (H100) 通常運転時の USART2 リンクのフレーム全体 (動き検知バイト[8]・種別バイト[2] 等は既知、5章)
-14. IDChip への書き込み (ブートローダ mode 7 / `IDChip Save Err`) がいつ・何を 1-Wire EEPROM に書くのか (14-15章)
+1. In Fahrenheit mode CalibraVal is converted as an absolute temperature (ch. 12). Needs verification on the actual device
+2. The reason TS80P is disabled (ch. 12. The code remains but is unreachable)
+3. Whether the external thermocouple (TK) has cold-junction compensation. The TK value did not change even when ch12 was moved
+4. The content of UI page 3 (part of the graph screen could be drawn, but the whole was not verified because emulation is slow)
+5. The exact part number of the IDChip (1-Wire EEPROM on PB11) and the tip (iron) update protocol (USART2, only an outline in ch. 14)
+6. The purpose for which the bootloader side drives PC4 as an output (the app side is confirmed as ADC1_IN14. The physical net is the app's ADC sense, ch. 15)
+7. What UART4 (PC11) was originally meant to receive (9600 RX only but no ISR, unused. Possibly a remnant for another variant/dock, ch. 15)
+8. RGB lighting: settings have colorR/G/B, FX, Mode, Bright, yet **no code that drives an RGB LED is found** (ch. 6). Whether an LED is mounted, and which pin/driver, is also unknown (separate from backlight PA8/TIM1)
+9. The utilization logic for the accelerometer (LIS3DH family, I2C 0x19). The bus/register settings are known, but **which axis/threshold FlipOver / motion detection uses for sleep wake or flip determination** is not traced
+10. Whether the app uses USB. USB (`0x40005C00`) is clocked in the app too, but whether the app exposes a USB drive/communication is not verified (DFU is bootloader only)
+11. The intended purpose of PB10 (output) and PB1 / TIM3_CH4 (100kHz PWM but always 0%), and the actual use of PC1 (ADC IN11, current sense?) — all configured only, purpose undetermined (ch. 15)
+12. Details of each inspection item and pins used (current/relay sense etc.) in the factory inspection mode (checkMode) (ch. 6)
+13. The entire frame of the USART2 link during normal operation of the tip (H100) (the motion-detection byte[8], type byte[2], etc. are known, ch. 5)
+14. When and what the write to the IDChip (bootloader mode 7 / `IDChip Save Err`) writes to the 1-Wire EEPROM (ch. 14-15)
 
-### 解決済み (記録)
+### Resolved (record)
 
-- **HEX の行構造は書き込み可否に影響する** → 影響する。ブートローダの検査パスが行長・改行を弾く (7・14章)
-- **ヒーター駆動ピン** → **PA1 (TIM5_CH2)**。測定終了で ON / 測定開始で OFF する単素子方式 (15章)
-- **PC4 / PC5** → PC5 = LCD RESET、PC4 = ADC1_IN14 (注入変換のこて先センス) (15章)
-- **入力センス PA15 / PC7 / PC9** → いずれも設定のみで未読み出し = 未使用。読まれる入力は PC6 (ボタン) のみ (15章)
-- **IDChip / 加速度センサーのバス** → IDChip = PB11 の 1-Wire EEPROM (DS2431/DS28E07 系)、PD5/PD6 = 加速度センサー I2C (アドレス 0x19、LIS3DH 系)。認証は ROM/メモリと UID 由来レコードを突き合わせる**鍵付きアンチクローン**と判明。完全な偽造解析はクローン作成が目的でないため行わない (15章、`bl_emu.py`)
-- **設定ボリュームと DFU ボリューム** → 同じ SPI フラッシュ上の**別々の FAT 領域** (設定 = base `0x000000`、DFU = base `0x200000`)。互いに消し合わず両方永続する (12・14章、エミュレーションで実測)
+- **The HEX line structure affects whether writing succeeds** → it does. The bootloader's inspection pass rejects line length/line endings (ch. 7, 14)
+- **Heater drive pin** → **PA1 (TIM5_CH2)**. A single-element scheme that turns ON at end of measurement / OFF at start of measurement (ch. 15)
+- **PC4 / PC5** → PC5 = LCD RESET, PC4 = ADC1_IN14 (injected-conversion tip sense) (ch. 15)
+- **Input sense PA15 / PC7 / PC9** → all configured only and never read = unused. The only read input is PC6 (button) (ch. 15)
+- **IDChip / accelerometer bus** → IDChip = 1-Wire EEPROM on PB11 (DS2431/DS28E07 family), PD5/PD6 = accelerometer I2C (address 0x19, LIS3DH family). Authentication turned out to be a **keyed anti-clone** that collates the ROM/memory against a UID-derived record. A full forgery analysis is not done, since cloning is not the goal (ch. 15, `bl_emu.py`)
+- **Settings volume and DFU volume** → **separate FAT regions** on the same SPI flash (settings = base `0x000000`, DFU = base `0x200000`). They do not erase each other and both persist (ch. 12, 14, measured empirically in emulation)
 
-### 情報を取り出す手段
+### Means of extracting information
 
-SWD が使えないため実機の内部状態は直接読めない。現状の手段:
+Since SWD is unavailable, the internal state of the actual device cannot be read directly. Current means:
 
-- **エミュレーション** (`ts1m_emu.py`) — UART デバッグ出力が丸ごと取れる。最も情報量が多い。GPIO/タイマ/UART の状態も読める (`pin_mode` / `heater_on` / `uart_tx` など、15章) し、`sim_measure` で測定/加熱サイクルを回してヒーターを観測できる
-- **ブートローダエミュレーション** (`bl_emu.py`) — 吸い出したブートローダを関数単位で実行。加速度センサー I2C と IDChip 1-Wire をモデル化し、認証のバス通信を観測できる (15章)
-- **フリーズ判定** — フックで条件成立時に無限ループさせ、固まるかどうかで1bit判定する。
-  実機で確実に動くことは確認済み (起動ロゴでフリーズ)
-- 文字列 1バイト書き換え — 画面表示で確認。反映されることは確認済み
-- **画面表示パッチ** — ホーム画面左上のこて先名ラベル (`0x080201CC` の drawString) を差し替え、任意の値を表示する (chipid / findmark / dumpboot)
-- **DFU ドライブ経由の取り出し** — DFU ドライブに置いたファイルの実体をアプリから上書きし、PC でそのファイルをコピーする。64KB 単位でデータを取り出せる (13章)
+- **Emulation** (`ts1m_emu.py`) — the UART debug output can be captured wholesale. The most information-rich. GPIO/timer/UART state can also be read (`pin_mode` / `heater_on` / `uart_tx` etc., ch. 15), and `sim_measure` can run measurement/heating cycles to observe the heater
+- **Bootloader emulation** (`bl_emu.py`) — runs the dumped bootloader function by function. Models the accelerometer I2C and IDChip 1-Wire to observe the authentication bus communication (ch. 15)
+- **Freeze determination** — a hook loops infinitely when a condition holds, and whether it freezes gives a 1-bit determination.
+  Confirmed to reliably work on the actual device (freeze at the boot logo)
+- 1-byte string rewrite — confirmed by on-screen display. Confirmed to be reflected
+- **On-screen display patch** — replaces the tip name label (`drawString` at `0x080201CC`) in the top-left of the home screen to display any value (chipid / findmark / dumpboot)
+- **Extraction via the DFU drive** — overwrite the actual data of a file placed on the DFU drive from the app, and copy that file on the PC. Data can be extracted in 64KB units (ch. 13)
 
-## 10. 温度制御とブザー
+## 10. Temperature control and buzzer
 
-エミュレーション (測定点を1つずつランプ) と静的解析で特定した内容。
-これらを使った 11章のパッチが実機で動作したことで裏付けられている (2026-09-27)。
-温度の単位はすべて 0.1℃ (設定の WorkTemp1 初期値 3000 = 300.0℃)。
+Content identified by emulation (ramping measurement points one at a time) and static analysis.
+Backed up by the patch of ch. 11 using these working on the actual device (2026-09-27).
+All temperature units are 0.1℃ (setting WorkTemp1 initial value 3000 = 300.0℃).
 
-### 変数
+### Variables
 
-| アドレス | 型 | 内容 | 根拠 |
+| Address | Type | Content | Basis |
 | --- | --- | --- | --- |
-| `0x2000023C` | u8 | 動作モード。1=作業, 2=スリープ, 0/3=ヒーター停止 | ヒーター制御の分岐。1 で目標=WorkTemp、2 で目標=SleepTemp |
-| `0x2000023E` | s16 | **現在温度** | adc3 だけをランプさせると単調に追従 (606→1485, 3431→6037)。ch12 は冷接点補償として逆向きに効く。ch13 / ch0 は無関係 |
-| `0x200001F4` | s16 | **PID の目標温度** | 作業モードで WorkTemp1 (3000) になることを確認。PID `0x08015494` がここを読む |
-| `0x200001F6` / `0x200001F8` | s16 | PID が書く 現在温度のコピー / 誤差 (目標-現在) | PID の逆アセンブル |
-| `0x200001D0` | u16 | ヒーター出力 (PID の出力、上限 290) | PID と ADC 割り込み |
-| `0x200001D2` | u8 | ヒーター制御の状態。0=測定+PID, 1=ADC割り込み待ち, 2=停止 | ヒーター制御の逆アセンブル |
-| `0x20000402` | u16 | こて先 ADC 生値 (ch10, mux 000)。過熱保護 `hot_ADC` の比較対象 | 同上 |
-| `0x200003FC` / `0x20000400` | u16 / s16 | ch12 (NTC) 生値 / 冷接点温度 | ch12 単独ランプで追従 |
-| `0x20000930` | u16×5 | こて先ごとの温度校正係数 (/1000)。フラッシュ `0x08077C00` に保存 | 校正処理 `0x0801990A` |
+| `0x2000023C` | u8 | Operating mode. 1=working, 2=sleep, 0/3=heater stopped | Heater control branch. 1 → target=WorkTemp, 2 → target=SleepTemp |
+| `0x2000023E` | s16 | **Current temperature** | Ramping adc3 alone makes it follow monotonically (606→1485, 3431→6037). ch12 acts in reverse as cold-junction compensation. ch13 / ch0 are irrelevant |
+| `0x200001F4` | s16 | **PID target temperature** | Confirmed to become WorkTemp1 (3000) in working mode. PID `0x08015494` reads here |
+| `0x200001F6` / `0x200001F8` | s16 | Copy of current temperature written by PID / error (target-current) | PID disassembly |
+| `0x200001D0` | u16 | Heater output (PID output, upper limit 290) | PID and ADC interrupt |
+| `0x200001D2` | u8 | Heater control state. 0=measure+PID, 1=waiting for ADC interrupt, 2=stopped | Heater control disassembly |
+| `0x20000402` | u16 | Tip ADC raw value (ch10, mux 000). The comparison target for overheat protection `hot_ADC` | Same as above |
+| `0x200003FC` / `0x20000400` | u16 / s16 | ch12 (NTC) raw value / cold-junction temperature | Follows when ch12 is ramped alone |
+| `0x20000930` | u16×5 | Per-tip temperature calibration coefficient (/1000). Saved to flash `0x08077C00` | Calibration processing `0x0801990A` |
 
-### 処理の流れ
+### Processing flow
 
-ヒーター制御 `0x080214A0` は毎周次のように動く。
+The heater control `0x080214A0` runs each cycle as follows.
 
-1. 動作モードに応じて目標温度 `[0x200001F4]` を**設定値から書き直す**
-   (作業: `0x200002E8` で選ばれた WorkTemp1/2/3、スリープ: SleepTemp、停止: 0)
-2. 状態が 0 なら温度計算 `0x0801EE10` を呼び、現在温度 `[0x2000023E]` を更新
-3. `0x08021620`: `r0 = [0x2000023E]` として PID (`[0x20000234]` = `0x08015495`) を呼ぶ
-4. PID は `[0x200001F4]` を目標として出力 `[0x200001D0]` を決める
-5. 過熱保護 (`[0x20000402]` と `hot_ADC` の比較) は PID とは独立に行われる
+1. Depending on the operating mode, **rewrite the target temperature `[0x200001F4]` from the setting**
+   (working: WorkTemp1/2/3 selected by `0x200002E8`, sleep: SleepTemp, stopped: 0)
+2. If state is 0, call temperature calculation `0x0801EE10` and update the current temperature `[0x2000023E]`
+3. `0x08021620`: with `r0 = [0x2000023E]`, call PID (`[0x20000234]` = `0x08015495`)
+4. PID decides the output `[0x200001D0]` with `[0x200001F4]` as the target
+5. Overheat protection (comparison of `[0x20000402]` and `hot_ADC`) is done independently of PID
 
-目標温度は毎周書き直されるので、PID 呼び出しの直前だけ書き換えれば、その回の制御にだけ効く。
+Since the target temperature is rewritten every cycle, if you rewrite it only just before the PID call, it affects only that cycle's control.
 
-表示は移動平均 (`0x20009DD4`、`0x0801EE00` = 合計/個数) を使い、目標の ±1.8℃ 以内なら目標値を表示する。
+The display uses a moving average (`0x20009DD4`, `0x0801EE00` = total/count), and shows the target value if within ±1.8℃ of the target.
 
-### ブザー
+### Buzzer
 
-ブザーオブジェクト `0x20000330` (実行時に RAM へ展開される関数テーブル。エミュレーションで内容を確認):
+Buzzer object `0x20000330` (a function table expanded into RAM at runtime. Content confirmed by emulation):
 
-| オフセット | 内容 |
+| Offset | Content |
 | --- | --- |
-| +0x00 | 初期化 `0x08021E81` |
+| +0x00 | Init `0x08021E81` |
 | +0x04 | **`beep(pattern)` `0x08012219`** |
-| +0x08 | tick `0x08014B71` (SysTick の最後から毎回呼ばれる) |
-| +0x0C | u8 残り回数 |
-| +0x10 | 再生中のパターンへのポインタ |
-| +0x14〜+0x20 | 組み込みパターン 4つ |
+| +0x08 | tick `0x08014B71` (called every time from the end of SysTick) |
+| +0x0C | u8 remaining count |
+| +0x10 | Pointer to the pattern being played |
+| +0x14–+0x20 | 4 built-in patterns |
 
-`beep()` は再生中でなければ `回数 = pattern[0]` とパターンを登録するだけ。
-パターンは u16 配列で、先頭の下位バイトが回数、続いて (ON ms, OFF ms) の組。
+`beep()` only registers `count = pattern[0]` and the pattern if not currently playing.
+A pattern is a u16 array whose first low byte is the count, followed by (ON ms, OFF ms) pairs.
 
-| パターン | 内容 | 用途 |
+| Pattern | Content | Use |
 | --- | --- | --- |
-| `0x0802A7B0` | 1回 300ms | |
-| `0x0802A7B6` | 5回 200/200ms | |
-| `0x0802A7CC` | 2回 80ms | |
-| `0x0802A7D6` | 1回 20ms | 操作音。スタンド / スリープの遷移でも鳴らしている |
+| `0x0802A7B0` | 1 time 300ms | |
+| `0x0802A7B6` | 5 times 200/200ms | |
+| `0x0802A7CC` | 2 times 80ms | |
+| `0x0802A7D6` | 1 time 20ms | Operation sound. Also sounded on stand / sleep transitions |
 
-鳴らし方: `r0 = パターン; ldr r3, =0x20000330; ldr r3, [r3, #4]; blx r3`
+How to sound it: `r0 = pattern; ldr r3, =0x20000330; ldr r3, [r3, #4]; blx r3`
 
-CCR3 に直接書いても鳴らなかったのは、tick が再生中でないとき毎ミリ秒 `CCR3 = 0` を書くため。
-音量は `BeepVolume` で音量テーブルを引くので、BeepVolume=0 だと鳴らない。
+Writing directly to CCR3 did not sound it because tick writes `CCR3 = 0` every millisecond when not playing.
+The volume indexes the volume table by `BeepVolume`, so with BeepVolume=0 it does not sound.
 
-## 11. 改造パッチ: 目標温度到達通知と自動ブースト
+## 11. Modification patch: target-temperature reached notification and auto boost
 
-`patches/` に実装。**実機で動作確認済み** (2026-09-27)。エミュレーションでも確認している。
+Implemented in `patches/`. **Confirmed working on the actual device** (2026-09-27). Also confirmed in emulation.
 
 ```
 python3 patches/build.py              # -> TS1M_Master_APP_V202_EN_notify_boost.hex / .bin
-python3 patches/test_notify_boost.py  # エミュレータでシナリオ試験 (数分)
-python3 patches/screenshot.py         # 加熱画面を仮想パネルに描画 (通常 / ブースト中)
+python3 patches/test_notify_boost.py  # scenario test in the emulator (a few minutes)
+python3 patches/screenshot.py         # draw the heating screen to the virtual panel (normal / during boost)
 ```
 
-### 仕組み
+### Mechanism
 
-- `0x08021624` の `ldr r1,[r6,#64]; blx r1` (4バイト) を `bl hook` に置き換える
-- フック (`0x0802849C`、332バイト) が元の PID 呼び出しを代わりに行う
-- ブースト中はその PID 呼び出しの間だけ目標温度を上げ、戻ってきたら元の値に戻す。
-  表示や他の処理が見る目標温度は常に設定値のまま
-- 状態は未使用のヒープの末尾 `0x2000BFA8` (24バイト) にマジック値付きで置く
-- ブースト表示のため、現在温度の大きな数字の文字色を決める 2箇所を `bl` に置き換える (下記)
-- ヒーター制御や安全装置 (過熱保護、抵抗値チェック) のコードには触れない
+- Replace `ldr r1,[r6,#64]; blx r1` (4 bytes) at `0x08021624` with `bl hook`
+- The hook (`0x0802849C`, 332 bytes) performs the original PID call on its behalf
+- During boost, it raises the target temperature only during that PID call, and restores the original value on return.
+  The target temperature seen by the display and other processing always stays the setting value
+- State is placed at the tail of the unused heap `0x2000BFA8` (24 bytes) with a magic value
+- For the boost display, two places that decide the text color of the large current-temperature digits are replaced with `bl` (below)
+- Does not touch the heater control or safety-device (overheat protection, resistance check) code
 
-### 動作
+### Behavior
 
-| 機能 | 条件 |
+| Feature | Condition |
 | --- | --- |
-| 到達通知 | 設定温度が変わるか作業モードに入った後、初めて ±3.0℃ に入ったら 2回ビープ (`0x0802A7CC`) |
-| ブースト開始 | 一度到達した後、10.0℃ 以上低い状態が 300ms 続いたら目標 +20.0℃ |
-| ブースト上限 | 450.0℃。設定が 450.0℃ 以上なら何もしない (目標を下げることはない) |
-| ブースト終了 | 設定温度まで回復したら。20秒続いたら打ち切り、回復するまで再開しない |
-| 無効 | 作業モード以外 (スリープ等)、校正モード (CAL)、目標 0 |
-| ブースト表示 | 目標を実際に上げている間、加熱画面の現在温度の大きな数字を白から赤 (`0xF800`) にする |
+| Reached notification | After the set temperature changes or working mode is entered, on first entering ±3.0℃, beep twice (`0x0802A7CC`) |
+| Boost start | After reaching once, if a state 10.0℃ or more below continues for 300ms, target +20.0℃ |
+| Boost cap | 450.0℃. If the setting is 450.0℃ or more, do nothing (never lowers the target) |
+| Boost end | When it recovers to the set temperature. If it continues for 20 seconds, abort, and do not restart until it recovers |
+| Disabled | Outside working mode (sleep etc.), calibration mode (CAL), target 0 |
+| Boost display | While the target is actually raised, make the large current-temperature digits on the heating screen red (`0xF800`) from white |
 
-パラメータは `patches/notify_boost.S` 先頭の `.equ` で変更できる (表示色は `BOOST_COLOR`、RGB565)。
+Parameters can be changed via the `.equ` at the top of `patches/notify_boost.S` (display color is `BOOST_COLOR`, RGB565).
 
-### ブースト表示
+### Boost display
 
-加熱画面 (UI のページ 1) は、現在温度を `drawString(str, x, y, font, fg, bg, flag)`
-(`0x08014834`、fg/bg はスタック渡しの RGB565) で描く。文字色を決めている箇所:
+The heating screen (UI page 1) draws the current temperature with `drawString(str, x, y, font, fg, bg, flag)`
+(`0x08014834`, fg/bg passed on the stack as RGB565). The places that decide the text color:
 
-| 置換箇所 | 元の命令 | 表示スタイル | 置換後 |
+| Replacement site | Original instruction | Display style | After replacement |
 | --- | --- | --- | --- |
-| `0x0801FA28` | `movw r1, #0xFFFF` (r1 → fg) | 通常 (グラフ付き) | `bl temp_color_a` (r1 = 白 / 赤) |
-| `0x0801B21A` | `str.w r9, [sp]` (r9 = `0xFFFF`) | 7セグ風 (`[0x20000455] != 0`) | `bl temp_color_b` ([sp] = 白 / 赤) |
+| `0x0801FA28` | `movw r1, #0xFFFF` (r1 → fg) | Normal (with graph) | `bl temp_color_a` (r1 = white / red) |
+| `0x0801B21A` | `str.w r9, [sp]` (r9 = `0xFFFF`) | 7-seg style (`[0x20000455] != 0`) | `bl temp_color_b` ([sp] = white / red) |
 
-どちらもフックが PID 呼び出しのたびに書く「このパスで目標を上げた」フラグ (状態 +14) を見るだけ。
-温度変更直後に設定値をオレンジ (`0xFC0A`) で一時表示する分岐 (`0x0801F990`) には触れていない。
+Both just look at the "target raised in this pass" flag (state +14) that the hook writes on each PID call.
+It does not touch the branch (`0x0801F990`) that temporarily displays the setting value in orange (`0xFC0A`) right after a temperature change.
 
-仮想パネル (EMULATION.md) で確認した結果:
-- 通常スタイル: ブースト中だけ数字が赤、それ以外は白のまま
-- 7セグ風: 数字は灰色の背景とブレンドされるため、赤ではなくピンク寄りに見える。通常時は白のまま
-- 7セグ風を選ぶ設定は `user_UI` ではなかった (`user_UI=1` にしても通常スタイルのまま)。
-  `0x20000455` を直接立てて描画した。どのメニュー項目がこれを切り替えるかは未確認
+Results confirmed on the virtual panel (EMULATION.md):
+- Normal style: the digits are red only during boost, otherwise stay white
+- 7-seg style: the digits blend with the gray background, so they look pinkish rather than red. Normally stays white
+- The setting that selects the 7-seg style was not `user_UI` (it stays normal style even with `user_UI=1`).
+  We set `0x20000455` directly to draw it. Which menu item switches this is not verified
 
-### エミュレーションでの確認結果
+### Confirmation results in emulation
 
-`patches/test_notify_boost.py` のシナリオ (こて先 ADC を台本どおりに動かし、PID に渡る目標とビープ呼び出しを記録):
+Scenarios of `patches/test_notify_boost.py` (move the tip ADC as scripted, and record the target passed to PID and beep calls):
 
-- 加熱 150→300℃: 297.0℃ で 1回だけ通知
-- 表示用フラグは、PID に上げた目標を渡したパスでだけ 1
-- 285℃ に落として保持: 300ms 後から PID の目標が 3200、呼び出し後は 3000 に戻る。20秒で打ち切り、回復まで再開しない
-- 回復後に再び低下: 再びブースト
-- 300ms 未満の低下: ブーストしない
-- 設定 440℃: ブーストは 450.0℃ で頭打ち。設定 450℃: 目標は変わらない
-- スリープ中: 通知もブーストもしない。作業に戻ると再び通知
+- Heating 150→300℃: notified only once at 297.0℃
+- The display flag is 1 only on the pass that passed the raised target to PID
+- Drop to 285℃ and hold: from 300ms on, the PID target is 3200, and reverts to 3000 after the call. Aborts at 20 seconds, does not restart until recovery
+- Drop again after recovery: boosts again
+- A drop of less than 300ms: no boost
+- Setting 440℃: boost caps at 450.0℃. Setting 450℃: the target does not change
+- During sleep: neither notification nor boost. On returning to work, notifies again
 
-元のファームで同じ試験を実行すると通知・ブーストの項目が失敗する (試験が効いていることの確認)。
+Running the same test on the original firmware fails the notification/boost items (confirmation that the test is effective).
 
-### 実機での確認
+### Confirmation on the actual device
 
-2026-09-27、実機でパッチの動作を確認した。
+On 2026-09-27 the patch's operation was confirmed on the actual device.
 
-パラメータを変えて書き込み直す場合も、元のファームを書き戻せる状態を確保しておくこと。
+Even when re-programming with changed parameters, keep the ability to write the original firmware back.
 
-## 12. 設定ファイル・外部フラッシュ・校正モード
+## 12. Settings file / external flash / calibration mode
 
-エミュレーションと静的解析で調べた内容。**実機では未確認** (チップ ID 以外)。
+Content examined by emulation and static analysis. **Not verified on the actual device** (except the chip ID).
 
-### 外部 SPI フラッシュ (W25Q64)
+### External SPI flash (W25Q64)
 
-設定ファイル `TS1M.TXT` は FatFs ボリューム上にあり、その実体は**外部 SPI フラッシュ**:
+The settings file `TS1M.TXT` is on a FatFs volume, whose actual location is the **external SPI flash**:
 
-| 項目 | 内容 |
+| Item | Content |
 | --- | --- |
-| バス | SPI2 (`0x40003800`)、CS = PB12 (Low で選択、`0x08017E7C`) |
-| デバイス | `0x90` (Manufacturer/Device ID) の応答 `0xEF16` を要求 = Winbond W25Q64 (8MB) |
-| バイト転送 | `0x08017F50(byte, 8)`、送信のみの連続転送 `0x08017FB0(buf, len, 8)` |
-| ボリューム | ラベル `TS1M`。マウントに失敗すると `f_mkfs` で作り直す |
+| Bus | SPI2 (`0x40003800`), CS = PB12 (selected Low, `0x08017E7C`) |
+| Device | Requires the response `0xEF16` to `0x90` (Manufacturer/Device ID) = Winbond W25Q64 (8MB) |
+| Byte transfer | `0x08017F50(byte, 8)`, transmit-only continuous transfer `0x08017FB0(buf, len, 8)` |
+| Volume | Label `TS1M`. If mounting fails, recreate with `f_mkfs` |
 
-DFU モードの USB マスストレージに置いたファイルも同じ SPI フラッシュ上にあるが、**設定ボリュームとは別の FAT 領域** (アプリ設定 = base `0x000000`、DFU = base `0x200000`)。14章「ストレージ配置」で実測。だから DFU 内容と設定は互いに消し合わず、どちらも永続する。
+The files placed on the USB mass storage in DFU mode are also on the same SPI flash, but in a **separate FAT region from the settings volume** (app settings = base `0x000000`, DFU = base `0x200000`). Measured empirically in ch. 14 "Storage layout". So the DFU content and the settings do not erase each other, and both persist.
 
-### 設定の読み込み・保存
+### Loading / saving settings
 
-設定オブジェクト `0x200002D0` (実行時に RAM へ展開される関数テーブル):
+Settings object `0x200002D0` (a function table expanded into RAM at runtime):
 
-| オフセット | 関数 | 内容 |
+| Offset | Function | Content |
 | --- | --- | --- |
-| +0x00 | `0x08022F61` | 起動時の読み込み |
-| +0x04 | `0x08012855` | 設定構造体 → テキスト |
-| +0x08 | `0x0801267D` | テキスト → 設定構造体 (解析) |
-| +0x0C | `0x08015B45` | 保存 (`0:TS1M.TXT` を上書き) |
-| +0x10 | `0x0802849D` | FatFs テスト関数 (未使用。パッチの置き場所) |
-| +0x14 | `0x08028463` | ℃⇔℉ 換算 `conv(to_f, value)` |
-| +0x18 | (データ) | 選択中の WorkTemp 番号 (`0x200002E8`) |
+| +0x00 | `0x08022F61` | Load at startup |
+| +0x04 | `0x08012855` | Settings struct → text |
+| +0x08 | `0x0801267D` | Text → settings struct (parse) |
+| +0x0C | `0x08015B45` | Save (overwrite `0:TS1M.TXT`) |
+| +0x10 | `0x0802849D` | FatFs test function (unused. The patch's placement site) |
+| +0x14 | `0x08028463` | ℃⇔℉ conversion `conv(to_f, value)` |
+| +0x18 | (data) | Selected WorkTemp number (`0x200002E8`) |
 
-起動時の流れ (`0x08022F60`): マウント → (失敗なら f_mkfs) → ラベル設定 → `0:TS1M.TXT` を読む (最大 1536 バイト) →
-解析。解析に失敗すると `Data Invalid` を出し、初期値テーブル `0x0802A4E6` を設定構造体へコピーしてファイルを書き直す。成功なら `Data Valid`。
+Startup flow (`0x08022F60`): mount → (if failed, f_mkfs) → set label → read `0:TS1M.TXT` (max 1536 bytes) →
+parse. If parsing fails it shows `Data Invalid`, copies the initial-value table `0x0802A4E6` into the settings struct, and rewrites the file. On success, `Data Valid`.
 
-### TS1M.TXT の形式
+### Format of TS1M.TXT
 
-ファームが書き出すファイル (エミュレーションで生成):
+The file the firmware writes out (generated in emulation):
 
 ```
 DefaultTemp = 1  #(1~3)
@@ -586,351 +588,351 @@ user_UI = 0  #(0:Wave~1:Digit)
 CalibraVal_245 = 0  #(C:-60~20  F:-76~68)
 ```
 
-- 先頭にコメント行 (`/*****...`) があり、各キーを `memmem` で探して `=` の後の数値を読む
-- 温度 (WorkTemp1-3、BoostTemp、SleepTemp、CalibraVal) と StepVal は**ファイル上は度単位、内部は ×10**
-- 範囲外の値があると解析失敗 → 全設定が初期値に戻る
-- `TempType=1` のときは範囲 (min/max) も ℉ に換算してから検査する
-- `user_UI` は表示スタイル: 0 = Wave (グラフ付き)、1 = Digit (7セグ風、`0x20000455` に反映)
+- There is a comment line (`/*****...`) at the head, and it finds each key with `memmem` and reads the numeric value after `=`
+- Temperatures (WorkTemp1-3, BoostTemp, SleepTemp, CalibraVal) and StepVal are **in degree units in the file, ×10 internally**
+- If any value is out of range, parsing fails → all settings revert to initial values
+- When `TempType=1`, the ranges (min/max) are also converted to ℉ before checking
+- `user_UI` is the display style: 0 = Wave (with graph), 1 = Digit (7-seg style, reflected in `0x20000455`)
 
-**ファームの不具合と思われる点**: 読み込み側は解析関数の第3引数に f_read の読み込みバイト数 (値) を渡しているが、
-解析関数はそれをポインタとして扱い `*(u16 *)br` を探索長に使う。つまり探索長はアドレス `br` (ファイルサイズ、1300 前後)
-にあるブートローダ領域の内容で決まる。その値がキーの位置 (最大 1300 バイト程度) より小さいと、正しいファイルでも毎回
-`Data Invalid` になり設定が初期値に戻る。エミュレータでは `0x0606` を置いている。
+**A likely firmware bug**: the load side passes the number of bytes read by f_read (a value) as the parse function's 3rd argument, but
+the parse function treats it as a pointer and uses `*(u16 *)br` as the search length. That is, the search length is determined by the content of the bootloader region
+at the address `br` (the file size, around 1300). If that value is smaller than the key positions (up to about 1300 bytes), even a correct file always becomes
+`Data Invalid` and settings revert to initial values. The emulator places `0x0606` there.
 
-**実機確認 (2026-09-27)**: WorkTmp1 を変更して再起動しても設定は保持された。この個体・このファイルサイズでは、
-ブートローダ領域の値が十分大きく、解析は正常に動いている。ただし `br` はファイルサイズなので、値の桁数が変わって
-ファイル長が変わると参照先アドレスも変わる。その場合に失敗する可能性は理論上残る。
+**Verified on the actual device (2026-09-27)**: settings were retained even after changing WorkTmp1 and rebooting. On this individual unit and this file size,
+the value in the bootloader region is large enough and parsing works normally. However, since `br` is the file size, if the number of digits of a value changes and
+the file length changes, the referenced address also changes. The possibility of failure in that case theoretically remains.
 
-### 華氏モード
+### Fahrenheit mode
 
-- `TempType=1` では設定・目標温度・現在温度がすべて ℉×10 になる (WorkTemp1 = 5720 = 572.0℉ を確認)
-- メニューで単位を切り替えると、SleepTemp / WorkTemp1-3 / BoostTemp の値と範囲が換算される。**CalibraVal は換算されない**
-- 校正係数は `tempCalRatio = (3500 − CalibraVal) / 3500` (`0x08021C28`)。℉ モードでは CalibraVal を**絶対温度として**
-  ℉→℃ 換算してから使うため、CalibraVal = 0 は 0℉ = −17.8℃ として扱われ、係数は 1.0486 になる
-- 結果として、℉ モードで CalibraVal が 0 のままだと**表示温度が約 4.9% 高く (300℃で約 +15℃) 出て、実際のこて先は設定より低い**
-  可能性がある。℉ モードで補正 0 にするには CalibraVal を 32 にする必要がある (32℉ → 0℃)。**実機未確認**
-- 通知・ブーストのパッチは内部単位のまま比較するので、℉ モードでは ±3.0℉ / 10.0℉ / +20.0℉ として動く。
-  上限 `TMAX = 4500` も 450.0℉ (232℃) になるため、通常の設定温度 (450℉ 以上) ではブーストは働かない (安全側)
+- In `TempType=1`, the settings/target/current temperatures all become ℉×10 (confirmed WorkTemp1 = 5720 = 572.0℉)
+- When switching units in the menu, the values and ranges of SleepTemp / WorkTemp1-3 / BoostTemp are converted. **CalibraVal is not converted**
+- The calibration coefficient is `tempCalRatio = (3500 − CalibraVal) / 3500` (`0x08021C28`). In ℉ mode it uses CalibraVal **as an absolute temperature**,
+  converting it ℉→℃ first, so CalibraVal = 0 is treated as 0℉ = −17.8℃ and the coefficient becomes 1.0486
+- As a result, in ℉ mode with CalibraVal left at 0, **the displayed temperature comes out about 4.9% high (about +15℃ at 300℃), and the actual tip may be lower than the setting**.
+  To make the correction 0 in ℉ mode, CalibraVal must be 32 (32℉ → 0℃). **Not verified on the actual device**
+- The notification/boost patch compares in internal units, so in ℉ mode it operates as ±3.0℉ / 10.0℉ / +20.0℉.
+  The cap `TMAX = 4500` also becomes 450.0℉ (232℃), so at normal set temperatures (450℉ or more) boost does not act (on the safe side)
 
-### 校正モード (CAL) と外部熱電対 (TK)
+### Calibration mode (CAL) and external thermocouple (TK)
 
-以前「熱電対モード」と呼んでいた `[0x20000914] != 0` は、**外部熱電対を使った自動校正モード**だった。
+What was previously called "thermocouple mode", `[0x20000914] != 0`, was **an auto-calibration mode using an external thermocouple**.
 
-| 項目 | 内容 |
+| Item | Content |
 | --- | --- |
-| 入口 | 加熱画面で Digit 表示 (`0x20000455 != 0`) のときのキー操作 (`0x08020754`)。画面の `CAL` / `TK:…℃` |
-| 目標温度 | 300.0℃ 固定 (`0x2000090E`) |
-| 処理 | `0x080193B8`。現在温度が 298.0〜302.0℃ に入って安定したら、外部熱電対の値を 500ms ごとに最大 100 回集め、平均から校正係数 (`0x20000930`) を更新 |
-| 外部熱電対 | **ADC ch0**。`0x200008A4` ≒ ch0 × 1.17 (0.1℃単位と推定)。受け付け範囲 250.0〜380.0 |
+| Entry | Key operation (`0x08020754`) when in Digit display (`0x20000455 != 0`) on the heating screen. The `CAL` / `TK:…℃` on screen |
+| Target temperature | Fixed at 300.0℃ (`0x2000090E`) |
+| Processing | `0x080193B8`. When the current temperature enters 298.0–302.0℃ and stabilizes, it collects the external thermocouple value every 500ms up to 100 times, and updates the calibration coefficient (`0x20000930`) from the average |
+| External thermocouple | **ADC ch0**. `0x200008A4` ≒ ch0 × 1.17 (inferred to be in 0.1℃ units). Accepted range 250.0–380.0 |
 
-### ADC チャネルの用途 (まとめ)
+### ADC channel usage (summary)
 
-| チャネル | 用途 | 確認方法 |
+| Channel | Use | Confirmation method |
 | --- | --- | --- |
-| ch10 (mux 000) | こて先熱電対 | 単独ランプで現在温度が追従 |
-| ch12 | 冷接点 (NTC) | 単独ランプで冷接点温度が逆向きに追従 |
-| ch13 | 電源電圧 (×7.77×校正/1000 mV) | 単独ランプで `0x2000039C` が追従 |
-| ch0 | 外部熱電対 (TK) | 単独ランプで `0x200008A4` が追従 |
-| ch4 | TS80P の温度 (無効化されている経路) | 静的解析 |
+| ch10 (mux 000) | Tip thermocouple | Current temperature follows when ramped alone |
+| ch12 | Cold junction (NTC) | Cold-junction temperature follows in reverse when ramped alone |
+| ch13 | Supply voltage (×7.77×cal/1000 mV) | `0x2000039C` follows when ramped alone |
+| ch0 | External thermocouple (TK) | `0x200008A4` follows when ramped alone |
+| ch4 | TS80P temperature (disabled path) | Static analysis |
 
 ### TS80P
 
-TS80P (`ironType=4`) 用のコードは残っている: 測定前後に PA3 の入力モードを切り替え (`0x08028BA8` / `0x08028BD4`)、
-ADC ch4 と専用の 158 点テーブル (`0x0802AA56`) で温度を求め、過熱しきい値 4000・電力係数 0.30 も定義されている。
-ただしこて先判定は 4 を返さず、手動選択メニューも 210/115 だけなので、到達しない。無効化の理由はファームからは分からない。
+The code for TS80P (`ironType=4`) remains: it switches PA3's input mode before/after measurement (`0x08028BA8` / `0x08028BD4`),
+finds the temperature with ADC ch4 and a dedicated 158-point table (`0x0802AA56`), and defines the overheat threshold 4000 and power coefficient 0.30.
+However, tip determination does not return 4 and the manual selection menu is only 210/115, so it is unreachable. The reason for disabling it cannot be told from the firmware.
 
-## 13. DFU ドライブとブートローダの吸い出し
+## 13. DFU drive and dumping the bootloader
 
-2026-09-27、実機で実施。
+Performed on the actual device 2026-09-27.
 
-### DFU ドライブ上のファイルの位置
+### Location of files on the DFU drive
 
-DFU モードの USB マスストレージに `MARK.BIN` (16 バイトの行 `TS1M-FINDVOL-MK\n` を 64KB 分並べたもの) をコピーし、
-アプリ側のパッチ `findmark` で外部 SPI フラッシュ (W25Q64) 8MB を 512 バイト境界ごとに探索した。
+We copied `MARK.BIN` (a 16-byte line `TS1M-FINDVOL-MK\n` repeated to fill 64KB) to the USB mass storage in DFU mode,
+and with the app-side patch `findmark` searched the 8MB external SPI flash (W25Q64) at every 512-byte boundary.
 
-- 結果は `247000:80`。**`0x247000` から 128 セクタ (64KB) が連続**して見つかった
-- つまり DFU ドライブのファイルは外部 SPI フラッシュ上に置かれ、アプリからも読み書きできる
-- その後に DFU で HEX を書き込んでも MARK.BIN の位置は変わらなかった (findmark → dumpboot と続けて書き込んでも同じ場所にあった)
+- The result was `247000:80`. **128 sectors (64KB) were found contiguous starting from `0x247000`.**
+- That is, the file on the DFU drive is placed on the external SPI flash and can be read/written from the app too
+- Even after subsequently writing a HEX via DFU, the location of MARK.BIN did not change (it was in the same place when findmark → dumpboot were written in succession)
 
-### ブートローダの吸い出し
+### Dumping the bootloader
 
-パッチ `dumpboot` で、SPI フラッシュ `0x247000`〜`0x256FFF` (MARK.BIN の実体) を内蔵フラッシュ `0x08000000`〜`0x0800FFFF` で上書きした
-(64KB がすべてマーカーのときだけ消去・書き込みし、読み戻して照合する)。画面に `OK` が出たあと DFU モードで MARK.BIN をコピーし、
-`bootloader.bin` (64KB) を得た。**個体キーを含むのでリポジトリには入れない** (`*.bin` は .gitignore 済み)。
+With the patch `dumpboot`, we overwrote the internal flash `0x08000000`–`0x0800FFFF` with SPI flash `0x247000`–`0x256FFF` (the actual data of MARK.BIN)
+(erase/write and read back to verify only when all 64KB are markers). After `OK` appeared on screen, we copied MARK.BIN in DFU mode and
+obtained `bootloader.bin` (64KB). **It contains the per-device key so it is not put in the repository** (`*.bin` is in .gitignore).
 
-内容の確認:
+Verification of content:
 
-| 項目 | 内容 |
+| Item | Content |
 | --- | --- |
-| ベクタテーブル | SP=`0x20004F88`, Reset=`0x08000229`。ハンドラはすべて `0x0800xxxx` の Thumb アドレス |
-| リセットハンドラ | Keil の定型 (`SystemInit` → `__main`)。アプリと同じツールチェーン |
-| 使用範囲 | `0x0000`-`0xAD0C` がコード・データ、以降はゼロ。`0xFFF0` に個体キー (12 バイト + ゼロ 4 バイト) |
-| 文字列 (DFU) | `DFU Mode`、`TS1M_DFU` (ボリュームラベルと思われる)、`Check the valid of the hex file:`、`Update the app:`、`Update the digital iron:`、`Completed %d%%`、`Check err:0x%02x`、`Update err:0x%02x` |
-| 文字列 (認証) | `Demo Mode`、`Not e-Design Product!`、`IDChip Err`、`IDChip Save Err`、`Init Err`、`Init OK` |
-| 文字列 (FAT) | `FAT32`、`MSDOS5.0`、`NO NAME`、`USB Special Disk` |
+| Vector table | SP=`0x20004F88`, Reset=`0x08000229`. All handlers are `0x0800xxxx` Thumb addresses |
+| Reset handler | Keil boilerplate (`SystemInit` → `__main`). Same toolchain as the app |
+| Used range | `0x0000`-`0xAD0C` is code/data, zero beyond. Per-device key at `0xFFF0` (12 bytes + 4 zero bytes) |
+| Strings (DFU) | `DFU Mode`, `TS1M_DFU` (thought to be the volume label), `Check the valid of the hex file:`, `Update the app:`, `Update the digital iron:`, `Completed %d%%`, `Check err:0x%02x`, `Update err:0x%02x` |
+| Strings (auth) | `Demo Mode`, `Not e-Design Product!`, `IDChip Err`, `IDChip Save Err`, `Init Err`, `Init OK` |
+| Strings (FAT) | `FAT32`, `MSDOS5.0`, `NO NAME`, `USB Special Disk` |
 
-`Update the digital iron:` があるので、ブートローダはこて先側 (外部デバイス) の更新も扱うと思われる。
-`IDChip` 系の文字列から、`Not e-Design Product!` の外部デバイス認証は認証チップ (IDChip) を使うと考えられる。
-いずれもブートローダの解析はこれから。
+Since there is `Update the digital iron:`, the bootloader is thought to handle updating the tip side (external device) too.
+From the `IDChip`-family strings, the external device authentication of `Not e-Design Product!` is thought to use an authentication chip (IDChip).
+Both bootloader analyses are still to come.
 
-## 14. ブートローダの解析
+## 14. Bootloader analysis
 
-13章で吸い出した `bootloader.bin` (内蔵フラッシュ `0x08000000`-`0x0800FFFF`) を静的解析 + Unicorn エミュレーションで調べた。全アドレスは絶対値。「確認」= コード読解またはエミュレーションで裏取り、「推定」= それ以外。
+We examined `bootloader.bin` (internal flash `0x08000000`-`0x0800FFFF`) dumped in ch. 13 by static analysis + Unicorn emulation. All addresses are absolute. "Confirmed" = backed by code reading or emulation, "inferred" = otherwise.
 
-### 起動シーケンス
+### Boot sequence
 
-`Reset_Handler` (`0x08000228`) → Keil `__main` (`0x08000120`、スキャッタロード展開) → `main` (`0x080081F8`)。
+`Reset_Handler` (`0x08000228`) → Keil `__main` (`0x08000120`, scatter-load expansion) → `main` (`0x080081F8`).
 
-`main` の流れ: SysTick 設定 → 製品種別読み込み (`0x08008814`) → 周辺初期化 (クロック `0x080026C4`、GPIO `0x080018CC`、表示 `0x08005D60`、IWDG `0x08003632`、SPI2 flash `0x08002918`、USART2 iron `0x08004824`) → 起動判定 → アンチクローン検査 `0x08003D64(0)` → 正常なら SysTick 停止 (`0x08007010`) 後にアプリへジャンプ、DFU 条件なら DFU ループへ。
+`main` flow: SysTick setup → read product variant (`0x08008814`) → peripheral init (clock `0x080026C4`, GPIO `0x080018CC`, display `0x08005D60`, IWDG `0x08003632`, SPI2 flash `0x08002918`, USART2 iron `0x08004824`) → boot decision → anti-clone check `0x08003D64(0)` → if normal, stop SysTick (`0x08007010`) then jump to the app; if a DFU condition, into the DFU loop.
 
-### 起動判定 (DFU かアプリか)
+### Boot decision (DFU or app)
 
-| 条件 | 判定 |
+| Condition | Decision |
 | --- | --- |
-| **PC8 が Low** (`GPIOC_IDR` bit8、`0x08008260`) | DFU モードを強制 (ボタン/ストラップと思われる。極性は推定、bit 判定は確認) |
-| **アプリの初期 SP が SRAM 外** (`*(0x08010000) & 0x2FFF0000 != 0x20000000`) | アプリ無効とみなし DFU へ (確認) |
+| **PC8 is Low** (`GPIOC_IDR` bit8, `0x08008260`) | Force DFU mode (thought to be a button/strap. Polarity inferred, bit test confirmed) |
+| **The app's initial SP is outside SRAM** (`*(0x08010000) & 0x2FFF0000 != 0x20000000`) | Treat the app as invalid and go to DFU (confirmed) |
 
-アプリ検証は **SP が SRAM 範囲かの 1 点だけ**で、リセットベクタの範囲チェックもイメージ CRC も無い。ジャンプは `MSP` にアプリ SP を設定して `*(0x08010004)` (= `0x0801085D`) へ `blx` する (`0x0800388C`→`0x0800651C`→`0x0800021A`)。**VTOR はブートローダでは設定せず**、アプリ側が設定する (2章のとおり `0x0801520A`)。
+App validation is **only the single point of whether SP is in the SRAM range**; there is no range check of the reset vector, nor an image CRC. The jump sets the app SP into `MSP` and does `blx` to `*(0x08010004)` (= `0x0801085D`) (`0x0800388C`→`0x0800651C`→`0x0800021A`). **VTOR is not set by the bootloader**; the app side sets it (as in ch. 2, `0x0801520A`).
 
-### アンチクローン / 個体認証
+### Anti-clone / per-device authentication
 
-二重構造 (いずれも確認):
+Two layers (both confirmed):
 
-- **ストア A — 個体キー `0x0800FFF0` (16B、12B 使用)**: チップ UID (`0x1FFFF7E8`、96bit) を、自身のアドレス値 `0x0800FFF0` を鍵に XOR 難読化して保存したもの。起動時に生 UID と照合する (`0x080056A4`)。**別のシリコン (別 UID) にコピーすると不一致**になり、これがアンチクローンの核。
-- **ストア B — 署名付き 38B レコード `0x08002A00`**: 機種共通の固定ブロック (個体秘密ではない)。末尾 4B が本体 34B の CRC32。中にモデル/シリアル、期待 UID フィールド、2 つのバージョン文字列 (どちらも `"1.00"`) を含む。
+- **Store A — per-device key `0x0800FFF0` (16B, 12B used)**: the chip UID (`0x1FFFF7E8`, 96 bits) stored XOR-obfuscated with its own address value `0x0800FFF0` as the key. At startup it is matched against the raw UID (`0x080056A4`). **Copying to different silicon (a different UID) causes a mismatch**, and this is the core of the anti-clone.
+- **Store B — signed 38B record `0x08002A00`**: a fixed block common to the model (not a per-device secret). The trailing 4B is the CRC32 of the 34B body. It contains a model/serial, an expected-UID field, and two version strings (both `"1.00"`).
 
-`0x08003D64` は RAM `0x200000C0` にステータス 4bit を積む: bit0 = レコード CRC/範囲 OK、bit1 = 派生構造の CRC OK、bit2 = レコード内 UID == 生 UID、bit3 = 副フィールド照合。全 bit + ストア A 一致で通過。失敗時は `0x08001104` で `Not e-Design Product!` を表示して停止 (クローン/改ざん時)。
+`0x08003D64` accumulates 4 status bits in RAM `0x200000C0`: bit0 = record CRC/range OK, bit1 = derived-structure CRC OK, bit2 = in-record UID == raw UID, bit3 = sub-field match. It passes with all bits + Store A match. On failure it shows `Not e-Design Product!` at `0x08001104` and stops (on clone/tamper).
 
-`IDChip` (`IDChip Err` / `IDChip Save Err`) は **PB11 の 1-Wire バス上の認証 EEPROM** (DS2431 / DS28E07 系)。ブートローダエミュレータ (`bl_emu.py`) で確定した (15章「ブートローダエミュレータと IDChip」)。
+`IDChip` (`IDChip Err` / `IDChip Save Err`) is an **authentication EEPROM on the 1-Wire bus of PB11** (DS2431 / DS28E07 family). Confirmed with the bootloader emulator (`bl_emu.py`) (ch. 15 "Bootloader emulator and IDChip").
 
-暗号は本物ではなく単バイト XOR の難読化 (`0x08001226` / `0x0800124A`) と、定数隠しの「n 未満の最大素数」生成器 (`0x08001C18`) の組み合わせ。
+The crypto is not real; it is a combination of single-byte XOR obfuscation (`0x08001226` / `0x0800124A`) and a "largest prime less than n" generator for constant hiding (`0x08001C18`).
 
-### アプリ → ブートローダのサービス呼び出し
+### App → bootloader service calls
 
-アプリは実行中にブートローダの `0x08002000` を `service(r0=0..3, out, in, ...)` として呼ぶ (アプリの `0x0801419C` が `0x08002001` を保持):
+The app calls the bootloader's `0x08002000` during execution as `service(r0=0..3, out, in, ...)` (the app's `0x0801419C` holds `0x08002001`):
 
-| service | 関数 | 内容 |
+| service | Function | Content |
 | --- | --- | --- |
-| 0 | `0x08001DE2` | レコード検証 → バージョン文字列 A (`"1.00"`) を返す |
-| 1 | `0x08001E7A` | 同 → バージョン文字列 B (`"1.00"`) |
-| 2 | `0x08001B44` | 設定/校正テーブルのハーフワード参照 (推定) |
-| 3 | `0x08000B24` | シリアル/HEX 文字列処理 (推定) |
+| 0 | `0x08001DE2` | Verify record → return version string A (`"1.00"`) |
+| 1 | `0x08001E7A` | Same → version string B (`"1.00"`) |
+| 2 | `0x08001B44` | Halfword reference into the settings/calibration table (inferred) |
+| 3 | `0x08000B24` | Serial/HEX string processing (inferred) |
 
-アプリが `Not e-Design Product!` で止まるのは、この検証 (service 0/1) が通らなかったときの反応。
+The app stopping at `Not e-Design Product!` is the reaction when this verification (service 0/1) does not pass.
 
-### DFU モード
+### DFU mode
 
-`0x0800380C` でボリューム `TS1M_DFU` を扱う。マウント失敗時は `f_mkfs` (`0x080071A8`) で作り直し、ラベルを設定 (`0x080089BE`)。`0x0800331C` の状態機械 (RAM `0x20000098`) がループ:
+`0x0800380C` handles the volume `TS1M_DFU`. On mount failure it recreates with `f_mkfs` (`0x080071A8`) and sets the label (`0x080089BE`). The state machine at `0x0800331C` (RAM `0x20000098`) loops:
 
-| 状態 | 内容 |
+| State | Content |
 | --- | --- |
-| 0 | アイドル。**USB 書き込みが止まってタイムアウトすると次へ** (イジェクト不要、エッジ駆動) |
-| 1 (`0x08003220`) | 更新ファイル探索。ルートを `f_readdir` し、**拡張子が `.hex` のファイル**を選ぶ (ファイル名は任意) |
-| 2 (`0x08002ECC`) | CHECK パス。成功なら最上位 ELA を見て対象を判定 (≥ `0x09000000` ならこて先、そうでなければアプリ)。`Check completed.` |
-| 3 (`0x0800314C`) | PROGRAM パス。`Update completed.` / 失敗で `Update err` |
-| 5 | 後始末。ELA トラッカーを戻し、USB を再接続してホストに再読込させる |
+| 0 | Idle. **When USB writing stops and times out, move to the next** (no eject needed, edge-driven) |
+| 1 (`0x08003220`) | Search for the update file. `f_readdir` the root and **select a file with extension `.hex`** (file name is arbitrary) |
+| 2 (`0x08002ECC`) | CHECK pass. On success, look at the top-level ELA to decide the target (≥ `0x09000000` → tip, otherwise → app). `Check completed.` |
+| 3 (`0x0800314C`) | PROGRAM pass. `Update completed.` / on failure `Update err` |
+| 5 | Cleanup. Reset the ELA tracker, reconnect USB to make the host reload |
 
-**更新ファイルは削除も改名もされない**。次の USB 書き込みまで再処理はされない。
+**The update file is neither deleted nor renamed.** It is not reprocessed until the next USB write.
 
-### ストレージ配置 (重要)
+### Storage layout (important)
 
-FatFs / USB-MSC 共通のディスク層 (`disk_read` `0x08007054`、`disk_write` `0x0800709E`、`disk_ioctl` `0x08007010`):
+The disk layer common to FatFs / USB-MSC (`disk_read` `0x08007054`, `disk_write` `0x0800709E`, `disk_ioctl` `0x08007010`):
 
-- **1 FatFs セクタ = 4096 バイト**、セクタ数 **512** → ボリュームは **外部 SPI フラッシュ `0x00200000`-`0x003FFFFF` (2MB)**。`flash_addr = 0x200000 + (sector << 12)`。
-- 書き込みは 4KB セクタ消去 (`0x080028C0`) → ページプログラム (`0x08002AE2`)。
-- **`MARK.BIN` が `0x247000` に置かれた理由**: `0x247000 - 0x200000 = 0x47000` = セクタ 71。ファイルのデータクラスタがそこに落ちただけ (13章の実測と一致)。
-- **アプリの設定ボリュームとは別領域** (訂正)。当初「同じ 2MB 領域」と推定していたが誤り。エミュレーションで両者のフラッシュアクセスを実測して確定した:
-  - アプリのフラッシュ読み書き (`read` `0x08014A64` / `write`) は **24bit アドレスをオフセット無しでそのまま送る = base 0x000000**。アプリを起動して `TS1M.TXT` を書かせると、アクセスは全て **`0x000000`-`0x046000`** に収まり (FAT ブートセクタ署名 `55AA` が `0x1FE`、`TS1M` ラベルが `0x41000`、`DefaultTemp` が `0x450F1`)、`0x200000` には一切触れない。
-  - DFU ボリュームは base `0x200000`。**8MB フラッシュ上にアプリ用 (先頭) と DFU 用 (`0x200000`) の 2 つの独立した FAT が共存**する。
-  - DFU は**マウント成功時は再フォーマットしない** (`f_mkfs` は失敗時のみ)。よって DFU に置いたファイルは、アプリ起動後に再度 DFU へ入っても残り、設定 (`TS1M.TXT`) も消えない。実機で観測される永続性はこれで説明できる。
+- **1 FatFs sector = 4096 bytes**, sector count **512** → the volume is the **external SPI flash `0x00200000`-`0x003FFFFF` (2MB)**. `flash_addr = 0x200000 + (sector << 12)`.
+- Writing is 4KB sector erase (`0x080028C0`) → page program (`0x08002AE2`).
+- **Why `MARK.BIN` was placed at `0x247000`**: `0x247000 - 0x200000 = 0x47000` = sector 71. The file's data cluster just fell there (matches the empirical measurement in ch. 13).
+- **A separate region from the app's settings volume** (correction). We initially inferred the "same 2MB region" but that was wrong. Confirmed by measuring both flash accesses empirically in emulation:
+  - The app's flash read/write (`read` `0x08014A64` / `write`) **sends the 24-bit address as-is with no offset = base 0x000000**. Starting the app and having it write `TS1M.TXT`, the accesses all fall within **`0x000000`-`0x046000`** (the FAT boot sector signature `55AA` at `0x1FE`, the `TS1M` label at `0x41000`, `DefaultTemp` at `0x450F1`), and it never touches `0x200000`.
+  - The DFU volume is base `0x200000`. **Two independent FATs, one for the app (at the head) and one for DFU (`0x200000`), coexist on the 8MB flash**.
+  - DFU **does not reformat on successful mount** (`f_mkfs` only on failure). Therefore a file placed via DFU remains even after the app boots and DFU is re-entered, and the settings (`TS1M.TXT`) are not erased either. The persistence observed on the actual device is explained by this.
 
-### HEX の検査と書き込み
+### HEX inspection and programming
 
-CHECK パスの行検証 `0x08003064` (確認):
+The line validation of the CHECK pass `0x08003064` (confirmed):
 
-1. 先頭が `:` でない → **err 0x01**
-2. **行長が `13 + 2·LL` と一致しない → err 0x02** (コロン + バイト数 + アドレス + 種別 + データ + チェックサム 2 桁 + CRLF)
-3. レコード種別 > 5 → **err 0x04** (種別 1 = EOF は成功、種別 4 = ELA)
-4. Intel-HEX チェックサム不一致 (`0x080011B8`) → **err 0x06**
-5. **末尾が CR+LF でない → err 0x07**
-6. ファイルが開けない → **err 0xFF**
+1. Does not start with `:` → **err 0x01**
+2. **Line length does not match `13 + 2·LL` → err 0x02** (colon + byte count + address + type + data + 2-digit checksum + CRLF)
+3. Record type > 5 → **err 0x04** (type 1 = EOF is success, type 4 = ELA)
+4. Intel-HEX checksum mismatch (`0x080011B8`) → **err 0x06**
+5. **Does not end with CR+LF → err 0x07**
+6. Cannot open file → **err 0xFF**
 
-PROGRAM パスのアドレス範囲ゲート `0x08002B34` / `0x08002D76` (確認、リテラルで裏取り):
+The address range gate of the PROGRAM pass `0x08002B34` / `0x08002D76` (confirmed, backed by literals):
 
-| 範囲 | 対象 |
+| Range | Target |
 | --- | --- |
-| `[0x08010000, 0x08077C00)` | アプリコード → 内蔵フラッシュへ書き込み |
-| `[0x09000000, 0x09020000)` | こて先ファーム (仮想アドレス) → こて先へ転送 |
-| それ以外 (長さ 0 含む) | **err 0x0A で拒否** |
+| `[0x08010000, 0x08077C00)` | App code → write to internal flash |
+| `[0x09000000, 0x09020000)` | Tip firmware (virtual address) → transfer to the tip |
+| Anything else (including length 0) | **Rejected with err 0x0A** |
 
-→ **ブートローダ (`0x08000000`-`0x0800FFFF`、`0x08010000` 未満) も校正/設定ページ (`0x08077C00` 以上) も HEX からは書き換えられない**。イメージ全体の署名・CRC・暗号は無く、行ごとの Intel-HEX チェックサムとアドレス範囲だけが関門。
+→ **Neither the bootloader (`0x08000000`-`0x0800FFFF`, below `0x08010000`) nor the calibration/settings pages (`0x08077C00` and above) can be rewritten from HEX.** There is no whole-image signature, CRC, or crypto; only the per-line Intel-HEX checksum and the address range are the gates.
 
-内蔵フラッシュ書き込み `0x08003728` は CH32 の高速モード (`FLASH_CR` bit17 FTER 消去 / bit16 FTPG プログラム、`0x40022000`)、**粒度 256 バイト**。
+Internal flash write `0x08003728` uses the CH32 fast mode (`FLASH_CR` bit17 FTER erase / bit16 FTPG program, `0x40022000`), **granularity 256 bytes**.
 
-### 「Update the digital iron」= こて先の更新
+### "Update the digital iron" = updating the tip
 
-対象は**ファイル名ではなくアドレスで決まる**: ELA が `0x09000000` 以上ならこて先。転送は **USART2 (`0x40004400`)、115200 8N1、DMA1 ch7** で、ACK/タイムアウト付き (`0x08004794` / `0x08004824`)。応答ステータス `0x24`-`0x26` が `Update err` の `0x0C`-`0x0E` に対応 (推定)。
+The target is **decided not by file name but by address**: if the ELA is `0x09000000` or higher, it is the tip. The transfer is **USART2 (`0x40004400`), 115200 8N1, DMA1 ch7**, with ACK/timeout (`0x08004794` / `0x08004824`). Response statuses `0x24`-`0x26` correspond to `Update err`'s `0x0C`-`0x0E` (inferred).
 
-### エラーコード
+### Error codes
 
-| Check err | 意味 | Update err | 意味 |
+| Check err | Meaning | Update err | Meaning |
 | --- | --- | --- | --- |
-| 0xFF | ファイルを開けない | 0xFF | ファイルを開けない |
-| 0x01 | 先頭 `:` 無し | 0x02 | 行が 550 文字超 |
-| 0x02 | 行長 ≠ 13+2·LL / 行長超過 | 0x0A | アドレス範囲外 / 長さ 0 |
-| 0x04 | レコード種別 > 5 | 0x0C-0x0E | こて先転送のステータス異常 (推定) |
-| 0x06 | チェックサム不一致 | | |
-| 0x07 | CR+LF 無し | | |
+| 0xFF | Cannot open file | 0xFF | Cannot open file |
+| 0x01 | No leading `:` | 0x02 | Line exceeds 550 characters |
+| 0x02 | Line length ≠ 13+2·LL / line too long | 0x0A | Address out of range / length 0 |
+| 0x04 | Record type > 5 | 0x0C-0x0E | Abnormal status of tip transfer (inferred) |
+| 0x06 | Checksum mismatch | | |
+| 0x07 | No CR+LF | | |
 
-(0x09 = EOF 到達 = 成功、0x08 = 継続の内部コード)
+(0x09 = EOF reached = success, 0x08 = internal continue code)
 
-### 7章の未解決事項の決着
+### Resolution of the unresolved item in ch. 7
 
-**HEX の行構造は書き込み可否に影響する (確認済み)**。CHECK パス (`0x08003064`) が、行長が `13 + 2·LL` と一致しない行 (err 0x02) と、CR+LF で終わらない行 (err 0x07) を拒否する。したがって**再シリアライズで行長・レコード分割・改行 (LF のみ等) が変わると CHECK で弾かれ、書き込みに至らない**。7章で観測した「再シリアライズ版が反映されなかった」現象は、この行検証で説明がつく (当時のパッチ処理内容の違いとは別に、行構造だけでも拒否要因になりうる)。現状の「元 HEX の該当行だけを書き換える」方式が正しい。
+**The HEX line structure affects whether writing succeeds (confirmed).** The CHECK pass (`0x08003064`) rejects lines whose length does not match `13 + 2·LL` (err 0x02) and lines that do not end with CR+LF (err 0x07). Therefore **if re-serialization changes line length, record splitting, or line endings (LF only, etc.), CHECK rejects them and they never reach programming**. The phenomenon observed in ch. 7 that "the re-serialized version was not reflected" is explained by this line validation (apart from the difference in the patch processing content at the time, the line structure alone can be a rejection cause). The current "rewrite only the relevant lines of the original HEX" method is correct.
 
-### `0x08077E00` (製品種別)
+### `0x08077E00` (product variant)
 
-`main` が `0x08008814(0x08077E00)` を呼び、校正ページ内の 16bit 値の下位バイトを読んで `{2,3}` にクランプ (既定 2)、RAM `0x20000000` に保持する。**読むだけ**で、ブートローダは書かず、HEX 更新でも書けない (範囲外)。起動時の製品バリアント選択と思われる。
+`main` calls `0x08008814(0x08077E00)`, reads the low byte of the 16-bit value in the calibration page, clamps it to `{2,3}` (default 2), and holds it in RAM `0x20000000`. It **only reads**; the bootloader does not write it, and it cannot be written by a HEX update (out of range). Thought to be the product-variant selection at startup.
 
-## 15. MCU 接続マップ (ピン・周辺一覧)
+## 15. MCU connection map (pin/peripheral list)
 
-ブートローダとアプリの両方から、GPIO の CRL/CRH 初期化・RCC クロック有効化・AFIO・DMA・ADC・各シリアルの設定を解析してまとめた。CH32F208WBU6 (QFN68)。「確認」= コード/エミュレーションで裏取り、「推定」= それ以外。RCC で実際にクロックが供給される周辺が「使用中」の根拠。
+Compiled by analyzing GPIO CRL/CRH init, RCC clock enables, AFIO, DMA, ADC, and each serial's configuration from both the bootloader and the app. CH32F208WBU6 (QFN68). "Confirmed" = backed by code/emulation, "inferred" = otherwise. A peripheral actually clocked by RCC is the basis for "in use".
 
-### 使用している周辺 (RCC で有効化)
+### Peripherals in use (enabled by RCC)
 
-| バス | アプリ | ブートローダ |
+| Bus | App | Bootloader |
 | --- | --- | --- |
 | APB2 | GPIOA/B/C/D, ADC1, TIM1, SPI1, USART1 | GPIOA/B/C/D, ADC1, TIM1, SPI1 |
 | APB1 | TIM2, TIM3, TIM4, TIM5, SPI2, USART2, UART4, USB | SPI2, USART2 |
 | AHB | DMA1 | DMA1 |
-| その他 | IWDG, (USB は EXTEN でプルアップ) | IWDG, USB |
+| Other | IWDG, (USB pull-up via EXTEN) | IWDG, USB |
 
-- **どちらも AFIO クロックを有効化しない** = ピンのリマップは一切無し。全周辺がデフォルトピン。EXTI (外部割り込み) も未設定。
-- GPIOE、ADC2/3、USART3、I2C1/2、DMA2、TIM6/7 は未使用。ADC は **ADC1 のみ**(こて先判定の「adc1/adc2」は ADC ペリフェラルではなく測定点の呼称)。
-- RCC 有効化ヘルパー: アプリ APB2ENR=`0x080158FC` / APB1ENR=`0x080158E4` / AHBENR=`0x080158CC`、ブートローダ APB2=`0x08004034` など。
+- **Neither enables the AFIO clock** = no pin remapping at all. All peripherals are on default pins. EXTI (external interrupts) is also unset.
+- GPIOE, ADC2/3, USART3, I2C1/2, DMA2, TIM6/7 are unused. ADC is **ADC1 only** (the "adc1/adc2" in tip determination is not the ADC peripheral but the naming of measurement points).
+- RCC enable helpers: app APB2ENR=`0x080158FC` / APB1ENR=`0x080158E4` / AHBENR=`0x080158CC`, bootloader APB2=`0x08004034`, etc.
 
-### ピン割り当て (両ファーム統合)
+### Pin assignment (both firmwares combined)
 
-| ピン | 機能 | 確度 | 備考 |
+| Pin | Function | Confidence | Notes |
 | --- | --- | --- | --- |
-| PA0 | ADC1_IN0 = 外部熱電対 (TK/CAL) | 確認 | アナログ入力 |
-| PA1 | **TIM5_CH2 = ヒーター駆動** (AF開ドレイン、100Hz) | 確認 | 測定終了でON/開始でOFF (下記) |
-| PA2 | USART2_TX | 確認 | こて先シリアル / 治具 / iron 更新 |
-| PA3 | USART2_RX | 確認 | TS80P 経路で一時的に入力切替 |
-| PA4 | ADC1_IN4 = TS80P 温度 (無効経路) | 確認 | |
-| PA5 | SPI1_SCK (表示) | 確認 | |
-| PA6 | アナログ MUX 選択線 (SPI1_MISO 不使用) | 確認 | 表示は書き込み専用 |
-| PA7 | SPI1_MOSI (表示) | 確認 | |
-| PA8 | TIM1_CH1 PWM = LCD バックライト輝度 | 確認/推定 | |
-| PA9 | USART1_TX = デバッグ出力 | 確認 | putchar `0x0801E99C` |
-| PA10 | USART1_RX | 推定 | |
-| PA11 / PA12 | USB_DM / USB_DP | 確認 | D+ プルアップは EXTEN `0x40023800` bit1 (内蔵) |
-| PA13 / PA14 | SWDIO / SWCLK | 推定 | |
-| PA15 | 入力プルアップ、**コードから一度も読まれない** (未使用) | 確認 | |
-| PB0 | LCD D/C (データ/コマンド) | 確認(BL) | |
-| PB1 | TIM3_CH4 100kHz PWM、デューティ常時0 (未使用の予備出力) | 確認 | 出力有効だが変調されない |
-| PB3 / PB4 | アナログ MUX 選択線 | 確認 | SWJ 無効化が必要な範囲 |
-| PB5 / PB6 / PB7 | アナログ front-end のゲイン/レンジ選択 (こて先種別で切替) | 確認 | `0x08019DCC`/`0x08019DF0` |
-| PB8 | TIM4_CH3 PWM = ブザー | 確認 | period 999、CCR3 で音量 |
-| PB10 | 出力 (用途不明、front-end enable?) | 確認(設定) | |
-| PB12 | SPI2 フラッシュ CS (Low アクティブ) | 確認 | `0x08017E7C` |
-| PB13 / PB14 / PB15 | SPI2_SCK / MISO / MOSI (W25Q64) | 確認 | |
-| PC0 | ADC1_IN10 = こて先熱電対 (MUX 経由) | 確認 | ADC 割り込みで注入変換 |
-| PC1 | ADC1_IN11 (regular 変換されず、用途未確定) | 確認(設定) | SQR 未使用 |
-| PC2 | ADC1_IN12 = 冷接点 NTC | 確認 | |
-| PC3 | ADC1_IN13 = 電源電圧分圧 | 確認 | |
-| PC4 | **ADC1_IN14 = 注入変換のこて先センス** (加熱の合間に読む) | 確認 | injected ch14、TIM2トリガ (下記) |
-| PC5 | **LCD RESET** (出力) | 確認 | 表示初期化で Low→High パルス |
-| PC6 | アナログハンドルのボタン (入力プルアップ) | 確認 | Low 500ms でスリープ |
-| PC7 | 入力プルアップ、**一度も読まれない** (未使用) | 確認 | |
-| PC8 | **DFU 起動選択ストラップ** (入力プルアップ、Low で DFU) | 確認 | BL が IDR bit8 を読む |
-| PC9 | 入力プルアップ、**一度も読まれない** (未使用) | 確認 | |
-| PC10 / PC11 | (PC10 未設定) / UART4_RX (入力プルアップ) | 確認 | UART4 は RX 専用・残骸 (下記) |
-| PC12 | アナログ MUX 選択線 | 確認 | |
-| PD2 / PD3 / PD4 | アナログ MUX 選択線 (PD3=245 判定、PD4 は QFN68 のみ) | 確認 | |
-| PD5 / PD6 | **加速度センサーの I2C (SDA / SCL、開ドレイン、ビットバング)** | 確認(BL) | LIS3DH 系、アドレス 0x19。FlipOver/動き検知。ブートローダが設定 |
-| PB11 | **IDChip の 1-Wire データ線** | 確認(BL) | こて先/カートリッジ認証 EEPROM。ブートローダのみ駆動 |
-| GPIOE | 未使用 | 確認 | |
+| PA0 | ADC1_IN0 = external thermocouple (TK/CAL) | Confirmed | Analog input |
+| PA1 | **TIM5_CH2 = heater drive** (AF open drain, 100Hz) | Confirmed | ON at end of measurement / OFF at start (below) |
+| PA2 | USART2_TX | Confirmed | Tip serial / jig / iron update |
+| PA3 | USART2_RX | Confirmed | Temporarily switched to input on the TS80P path |
+| PA4 | ADC1_IN4 = TS80P temperature (disabled path) | Confirmed | |
+| PA5 | SPI1_SCK (display) | Confirmed | |
+| PA6 | Analog MUX select line (SPI1_MISO unused) | Confirmed | Display is write-only |
+| PA7 | SPI1_MOSI (display) | Confirmed | |
+| PA8 | TIM1_CH1 PWM = LCD backlight brightness | Confirmed/inferred | |
+| PA9 | USART1_TX = debug output | Confirmed | putchar `0x0801E99C` |
+| PA10 | USART1_RX | Inferred | |
+| PA11 / PA12 | USB_DM / USB_DP | Confirmed | D+ pull-up is EXTEN `0x40023800` bit1 (built-in) |
+| PA13 / PA14 | SWDIO / SWCLK | Inferred | |
+| PA15 | Input pull-up, **never read by code** (unused) | Confirmed | |
+| PB0 | LCD D/C (data/command) | Confirmed (BL) | |
+| PB1 | TIM3_CH4 100kHz PWM, duty always 0 (unused spare output) | Confirmed | Output enabled but not modulated |
+| PB3 / PB4 | Analog MUX select lines | Confirmed | Range where SWJ must be disabled |
+| PB5 / PB6 / PB7 | Analog front-end gain/range select (switched by tip type) | Confirmed | `0x08019DCC`/`0x08019DF0` |
+| PB8 | TIM4_CH3 PWM = buzzer | Confirmed | period 999, volume via CCR3 |
+| PB10 | Output (purpose unknown, front-end enable?) | Confirmed (config) | |
+| PB12 | SPI2 flash CS (active Low) | Confirmed | `0x08017E7C` |
+| PB13 / PB14 / PB15 | SPI2_SCK / MISO / MOSI (W25Q64) | Confirmed | |
+| PC0 | ADC1_IN10 = tip thermocouple (via MUX) | Confirmed | Injected conversion in the ADC interrupt |
+| PC1 | ADC1_IN11 (not regular-converted, purpose undetermined) | Confirmed (config) | SQR unused |
+| PC2 | ADC1_IN12 = cold-junction NTC | Confirmed | |
+| PC3 | ADC1_IN13 = supply voltage divider | Confirmed | |
+| PC4 | **ADC1_IN14 = injected-conversion tip sense** (read between heating) | Confirmed | injected ch14, TIM2 trigger (below) |
+| PC5 | **LCD RESET** (output) | Confirmed | Low→High pulse in display init |
+| PC6 | Analog handle button (input pull-up) | Confirmed | Low 500ms → sleep |
+| PC7 | Input pull-up, **never read** (unused) | Confirmed | |
+| PC8 | **DFU boot select strap** (input pull-up, Low → DFU) | Confirmed | BL reads IDR bit8 |
+| PC9 | Input pull-up, **never read** (unused) | Confirmed | |
+| PC10 / PC11 | (PC10 unset) / UART4_RX (input pull-up) | Confirmed | UART4 is RX-only remnant (below) |
+| PC12 | Analog MUX select line | Confirmed | |
+| PD2 / PD3 / PD4 | Analog MUX select lines (PD3=245 determination, PD4 QFN68 only) | Confirmed | |
+| PD5 / PD6 | **Accelerometer I2C (SDA / SCL, open drain, bit-banged)** | Confirmed (BL) | LIS3DH family, address 0x19. FlipOver/motion detection. Configured by the bootloader |
+| PB11 | **IDChip 1-Wire data line** | Confirmed (BL) | Tip/cartridge authentication EEPROM. Driven only by the bootloader |
+| GPIOE | Unused | Confirmed | |
 
-### 周辺 → ピン
+### Peripheral → pin
 
-| 周辺 | ピン |
+| Peripheral | Pin |
 | --- | --- |
-| 表示 (SPI1、書き込み専用) | SCK=PA5, MOSI=PA7, D/C=PB0, バックライト=PA8 (TIM1_CH1)。CS/RST は未確定 (PC4/PC5 の可能性、下記) |
-| 外部フラッシュ W25Q64 (SPI2) | SCK=PB13, MISO=PB14, MOSI=PB15, CS=PB12 |
-| こて先シリアル (USART2) | TX=PA2, RX=PA3。H100 フレーム / 治具ハンドシェイク / iron ファーム更新。RX 割り込み `0x08017600` (唯一の有効 USART IRQ)。TX は DMA1 ch7 |
-| デバッグ (USART1) | TX=PA9 |
-| 第2シリアル (UART4) | RX=PC11。9600 baud・RX 専用だが未使用 (下記)。TX (PC10) は未設定 |
-| ブザー (TIM4_CH3) | PB8 |
-| バックライト (TIM1_CH1) | PA8 |
-| 測定タイマ (TIM2) | ピン無し。測定ごとに period 400 で再設定し ADC 同期に使う |
-| ADC1 入力 | IN0=PA0(外部TC), IN4=PA4(TS80P), IN10=PC0(こて先TC・MUX・regular), IN12=PC2(冷接点), IN13=PC3(電源電圧), **IN14=PC4(注入変換=加熱ループの高速こて先センス)**, IN11=PC1(未使用) |
-| アナログ MUX 選択 (7本) | PA6, PB3, PB4, PC12, PD2, PD3, PD4 → どの信号を ADC1_IN10 に通すか選ぶ |
-| front-end ゲイン/レンジ選択 | PB5, PB6, PB7 (こて先種別で切替) |
+| Display (SPI1, write-only) | SCK=PA5, MOSI=PA7, D/C=PB0, backlight=PA8 (TIM1_CH1). CS/RST undetermined (possibly PC4/PC5, below) |
+| External flash W25Q64 (SPI2) | SCK=PB13, MISO=PB14, MOSI=PB15, CS=PB12 |
+| Tip serial (USART2) | TX=PA2, RX=PA3. H100 frame / jig handshake / iron firmware update. RX interrupt `0x08017600` (the only active USART IRQ). TX is DMA1 ch7 |
+| Debug (USART1) | TX=PA9 |
+| Second serial (UART4) | RX=PC11. 9600 baud, RX-only but unused (below). TX (PC10) is unset |
+| Buzzer (TIM4_CH3) | PB8 |
+| Backlight (TIM1_CH1) | PA8 |
+| Measurement timer (TIM2) | No pin. Reconfigured to period 400 per measurement and used for ADC synchronization |
+| ADC1 inputs | IN0=PA0 (external TC), IN4=PA4 (TS80P), IN10=PC0 (tip TC, MUX, regular), IN12=PC2 (cold junction), IN13=PC3 (supply voltage), **IN14=PC4 (injected conversion = the heating loop's fast tip sense)**, IN11=PC1 (unused) |
+| Analog MUX select (7 lines) | PA6, PB3, PB4, PC12, PD2, PD3, PD4 → select which signal is passed to ADC1_IN10 |
+| Front-end gain/range select | PB5, PB6, PB7 (switched by tip type) |
 | USB (DFU/MSC) | DM=PA11, DP=PA12 |
-| 加速度センサー (I2C ビットバング) | SDA=PD5, SCL=PD6 (アドレス 0x19、LIS3DH 系) |
-| IDChip 認証 (1-Wire) | PB11 (1-Wire EEPROM、DS2431/DS28E07 系) |
-| DFU 起動ストラップ | PC8 (Low で DFU) |
+| Accelerometer (I2C bit-bang) | SDA=PD5, SCL=PD6 (address 0x19, LIS3DH family) |
+| IDChip authentication (1-Wire) | PB11 (1-Wire EEPROM, DS2431/DS28E07 family) |
+| DFU boot strap | PC8 (Low → DFU) |
 
-### ヒーター駆動 = PA1 (TIM5_CH2)
+### Heater drive = PA1 (TIM5_CH2)
 
-こて先の発熱素子は測定と共用する単素子方式。**加熱と温度測定を時分割**する:
+The tip's heating element is a single-element scheme shared with measurement. **Heating and temperature measurement are time-multiplexed**:
 
-- **測定窓** (TIM2、`0x40000000`、period 400): TIM2 が ADC の注入変換をトリガし、ADC1_2 割り込み (`0x08011DC8`、ベクタ 34) が**注入チャネル ch14 = PC4** を読む (JSQR=`0x70000`)。この間ヒーターは OFF。表示・こて先判定用の現在温度は別に regular 変換で ch10 = PC0 (MUX 経由) から得る。
-- **加熱** (測定窓の合間): **PA1 = TIM5_CH2** (`0x40000C00`、100Hz) を出力有効にして素子に通電する。
+- **Measurement window** (TIM2, `0x40000000`, period 400): TIM2 triggers the ADC's injected conversion, and the ADC1_2 interrupt (`0x08011DC8`, vector 34) reads **injected channel ch14 = PC4** (JSQR=`0x70000`). The heater is OFF during this. The current temperature for display and tip determination is obtained separately by regular conversion from ch10 = PC0 (via MUX).
+- **Heating** (between measurement windows): enable the output of **PA1 = TIM5_CH2** (`0x40000C00`, 100Hz) to energize the element.
 
-切り替えは測定サブシステムの関数テーブル (RAM `0x20000368`) のメソッドで行う:
+The switching is done by methods in the measurement subsystem's function table (RAM `0x20000368`):
 
-| メソッド | アドレス | 動作 |
+| Method | Address | Action |
 | --- | --- | --- |
-| 測定開始 | `0x08012F3C` | TIM5 無効化 + `CCxCmd(TIM5, CH2, 0)` → **PA1 出力 OFF** (加熱停止して測定) |
-| 測定終了 | `0x08013A20` | TIM5 有効化 + `CCxCmd(TIM5, CH2, 1)` → **PA1 出力 ON** (加熱再開) |
+| Start measurement | `0x08012F3C` | Disable TIM5 + `CCxCmd(TIM5, CH2, 0)` → **PA1 output OFF** (stop heating and measure) |
+| End measurement | `0x08013A20` | Enable TIM5 + `CCxCmd(TIM5, CH2, 1)` → **PA1 output ON** (resume heating) |
 
-`0x08016C24` = `TIM_CCxCmd` (CCER 操作、`[base+0x0C]`)。PID (`0x08015494`) が誤差 = 目標 (`0x200001F4`) − 現在温度から出力を算出し、加熱時間 (加熱フェーズの長さ) で電力を決めるソフトウェア PWM。過熱保護は測定した ADC 生値 (`0x20000402`) を機種別の `hot_ADC` しきい値 (3700 / 3000 / 2900 / 4000 / 2800 = `0x08021646`〜) と比較し、超えたら出力を 0 にする。
+`0x08016C24` = `TIM_CCxCmd` (CCER operation, `[base+0x0C]`). PID (`0x08015494`) computes the output from error = target (`0x200001F4`) − current temperature, and it is a software PWM whose power is decided by heating time (length of the heating phase). Overheat protection compares the measured ADC raw value (`0x20000402`) against the per-model `hot_ADC` threshold (3700 / 3000 / 2900 / 4000 / 2800 = `0x08021646`–), and if exceeded it sets the output to 0.
 
-PA1 は AF 開ドレイン (mode `0x1c`) で、外部プルアップ + MOSFET ゲートと見られる。メインループのエミュレーションでは ADC 割り込みがスタブされ測定サイクルが進まないため PA1 は動かず、当初 idle と誤認していた (関数テーブル経由でのみ駆動されるため)。
+PA1 is AF open drain (mode `0x1c`), seen as an external pull-up + MOSFET gate. In the main-loop emulation, the ADC interrupt is stubbed so the measurement cycle does not advance, PA1 does not move, and it was initially misidentified as idle (because it is driven only via the function table).
 
-- 補足: どのタイマ PWM チャネルもヒーターの可変デューティを持たない (`SetCompare2`/`4` は未使用、CCR は TIM1_CH1=PA8 バックライトと TIM4_CH3=PB8 ブザーのみ)。TIM5_CH2 CCR2 (`0x40000C38`) への書き込みも無く、電力は加熱フェーズの長さで決まる。
+- Note: none of the timer PWM channels have a variable duty for the heater (`SetCompare2`/`4` are unused, CCR is only TIM1_CH1=PA8 backlight and TIM4_CH3=PB8 buzzer). There is also no write to TIM5_CH2 CCR2 (`0x40000C38`), and power is decided by the length of the heating phase.
 
-### 表示 (SPI1) の CS / RESET と PC4/PC5 (エミュレータで確定)
+### Display (SPI1) CS / RESET and PC4/PC5 (confirmed with the emulator)
 
-強化したエミュレータ (`sim_measure`、`pin_mode`、ADC/JSQR フック) で 3 点を詰めた:
+We pinned down 3 points with an enhanced emulator (`sim_measure`, `pin_mode`, ADC/JSQR hooks):
 
-- **PC5 = LCD RESET**: 表示初期化 `0x08014440` が PC5 を Low→High にパルスし、直後に SLPOUT (0x11) / MADCTL / ガンマ (E0h/E1h) 等のコマンドを送る。**LCD の CS はハード側で Low 固定** (GPIO 駆動が無い)、D/C = PB0。
-- **PC4 = ADC1_IN14 の注入変換入力**: regular シーケンス (SQR1-3) は空で、ADC の単発変換 (`ADC_READ_FN`) は ch10/PC0 (MUX 経由) を読む。一方 **injected シーケンス JSQR = `0x70000` → ch14 = PC4** を `ADC_InjectedChannelConfig` (`0x080120C8`) が設定する。injected 変換は TIM2 (測定窓) がトリガし、ADC1_2 割り込み (`0x08011DC8`) が読む — つまり **PC4 は加熱の合間にこて先を測る高速ループのセンス入力**。「未使用」ではない。
-- **PB1 = TIM3_CH4 の 100kHz PWM**: `TIM_OC4Init` (`0x08016D5C`) が CH4 を PWM1 モードで設定し出力も有効化する (CCER CC4E=1、PSC=1 / ARR=479 → 100kHz) が、**デューティ CCR4 は起動時に 0 が書かれるだけで実行時に変調されない** (`SetCompare4` の呼び出しは無い)。よって常時 Low。ハードの予備出力を 0% で放置していると見られる。
+- **PC5 = LCD RESET**: the display init `0x08014440` pulses PC5 Low→High, then immediately sends commands like SLPOUT (0x11) / MADCTL / gamma (E0h/E1h). **The LCD's CS is tied Low in hardware** (no GPIO drive), D/C = PB0.
+- **PC4 = ADC1_IN14 injected-conversion input**: the regular sequence (SQR1-3) is empty, and the ADC's single conversion (`ADC_READ_FN`) reads ch10/PC0 (via MUX). Meanwhile `ADC_InjectedChannelConfig` (`0x080120C8`) sets the **injected sequence JSQR = `0x70000` → ch14 = PC4**. The injected conversion is triggered by TIM2 (the measurement window) and read by the ADC1_2 interrupt (`0x08011DC8`) — that is, **PC4 is the sense input of the fast loop that measures the tip between heating**. It is not "unused".
+- **PB1 = TIM3_CH4 100kHz PWM**: `TIM_OC4Init` (`0x08016D5C`) sets CH4 to PWM1 mode and also enables the output (CCER CC4E=1, PSC=1 / ARR=479 → 100kHz), but **the duty CCR4 is only written 0 at startup and is not modulated at runtime** (there is no call to `SetCompare4`). So it is always Low. It seems a hardware spare output is left at 0%.
 
-補足: ブートローダは PC4/PC5 をどちらも出力に設定する。PC5 はアプリと同じく RESET で整合する。PC4 はブートローダが自前の表示処理で出力駆動するが、アプリでは注入変換のアナログ入力。物理ネットはアプリの ADC センスで、ブートローダの PC4 出力用途 (CS の推定) だけが未確定として残る。
+Note: the bootloader sets both PC4/PC5 as outputs. PC5 is consistent as RESET, same as the app. PC4 is driven as an output by the bootloader's own display processing, but in the app it is an injected-conversion analog input. The physical net is the app's ADC sense, and only the bootloader's PC4 output purpose (inferred as CS) remains undetermined.
 
-### UART4 と未使用の入力ピン (エミュレータで確定)
+### UART4 and unused input pins (confirmed with the emulator)
 
-- **UART4 (PC11)**: 初期化 (`0x08015398`) で **9600 baud・RX 専用** (CR1 = `UE|RE|RXNEIE`、TE=0)。TX ピン PC10 は AF 設定されない。だが **UART4 の割り込みベクタは共有の既定ハンドラ `0x08010876` (`b .` 無限ループ)** で、専用 ISR が無い。実行中に DR (`0x40004C04`) は一度も読まれない。よって **UART4 は機能的に未使用 (残骸)**。RXNEIE=1 のため PC11 に 9600 の信号が来ると既定ハンドラで**ハングする潜在バグ**があるが、通常は何も接続されず発火しない。別バリアント (ドック等) 用の名残と思われる。
-- **入力センス PA15 / PC7 / PC9**: いずれも起動時に入力プルアップに設定されるが、**コードのどこからも読まれない** (GPIO IDR を読むのは `GPIO_ReadInputDataBit` 経由の 1 箇所だけで、対象は PC6 = ハンドルボタンのみ、stand/sleep 関数 `0x801EB58` 内 `0x801EBA0`)。よって PA15 / PC7 / PC9 は**未使用/予備入力**。EXTI も無いのでボタン割り込みも無い。
+- **UART4 (PC11)**: init (`0x08015398`) is **9600 baud, RX-only** (CR1 = `UE|RE|RXNEIE`, TE=0). The TX pin PC10 is not AF-configured. But **UART4's interrupt vector is the shared default handler `0x08010876` (`b .` infinite loop)** with no dedicated ISR. DR (`0x40004C04`) is never read during execution. So **UART4 is functionally unused (a remnant)**. Because RXNEIE=1, there is a **latent bug that would hang in the default handler if a 9600 signal arrives on PC11**, but normally nothing is connected so it does not fire. Thought to be a remnant for another variant (dock etc.).
+- **Input senses PA15 / PC7 / PC9**: all set to input pull-up at startup, but **read from nowhere in the code** (the GPIO IDR is read via `GPIO_ReadInputDataBit` in only one place, and the target is only PC6 = the handle button, at `0x801EBA0` inside the stand/sleep function `0x801EB58`). So PA15 / PC7 / PC9 are **unused/spare inputs**. There is no EXTI either, so no button interrupt.
 
-### ブートローダエミュレータと IDChip (`bl_emu.py`)
+### Bootloader emulator and IDChip (`bl_emu.py`)
 
-ブートローダ用のハーネス `bl_emu.py` を作り、ビットバスをモデル化して IDChip と加速度センサーを詰めた。フル起動 (USB/FAT) は重いので、関数を直接呼ぶ `call()` を使う。
+We built a harness `bl_emu.py` for the bootloader, modeled the bit-bang buses, and pinned down the IDChip and accelerometer. Because a full boot (USB/FAT) is heavy, we use `call()`, which calls functions directly.
 
-- **加速度センサー (I2C、PD5=SDA / PD6=SCL、アドレス 0x19)**: 起動時に `0x08002624` (GPIO 設定) → `0x080025D0` がレジスタ 0x20〜0x24 に `57 00 00 08 00` を書く。これは **LIS3DH 系の CTRL_REG1〜5** (CTRL_REG1=0x57 = 100Hz・全軸有効、CTRL_REG4=0x08)。FlipOver / 動き検知用。I2C プリミティブ: `write_regs`=`0x080035E8`、`read_regs`=`0x08003544` (再スタート + 0x33=読みアドレス)。ハーネスの I2C スレーブで書き込み (reg 0x20〜0x24) と読み戻しを再現して確定した。
-- **IDChip (1-Wire、PB11)**: `0x080042BE` = リセット+プレゼンス、`0x0800637C` = バイト書き込み、`0x080041E0` = バイト読み出し (いずれもタイムスロット式)。`0x080021A0` が **リセット → Read ROM (`0x33`) → 8 バイト**を読む (プレゼンス無しなら `IDChip Err`)。認証 `0x08003D64` はさらに **Skip ROM (`0xCC`) + Read Memory (`0xF0`) + アドレス** でメモリページ (0x0000 / 0x0040) を読む。よって IDChip は単なる ID チップではなく **1-Wire EEPROM (DS2431 / DS28E07 系)**。ROM ID とメモリ内容を内部レコード (UID 由来の XOR/CRC、13-14章) と突き合わせて認証する。ハーネスの 1-Wire スレーブでコマンド列 (`CC F0 00 00` / `CC F0 40 00` / `33`) を捕捉して確定した。
+- **Accelerometer (I2C, PD5=SDA / PD6=SCL, address 0x19)**: at startup `0x08002624` (GPIO config) → `0x080025D0` writes `57 00 00 08 00` to registers 0x20–0x24. These are the **LIS3DH-family CTRL_REG1–5** (CTRL_REG1=0x57 = 100Hz, all axes enabled; CTRL_REG4=0x08). For FlipOver / motion detection. I2C primitives: `write_regs`=`0x080035E8`, `read_regs`=`0x08003544` (restart + 0x33=read address). Confirmed by reproducing the write (reg 0x20–0x24) and read-back in the harness's I2C slave.
+- **IDChip (1-Wire, PB11)**: `0x080042BE` = reset+presence, `0x0800637C` = byte write, `0x080041E0` = byte read (all time-slot based). `0x080021A0` does **reset → Read ROM (`0x33`) → 8 bytes** (if no presence, `IDChip Err`). Authentication `0x08003D64` further reads a memory page (0x0000 / 0x0040) with **Skip ROM (`0xCC`) + Read Memory (`0xF0`) + address**. So the IDChip is not just an ID chip but a **1-Wire EEPROM (DS2431 / DS28E07 family)**. It authenticates by collating the ROM ID and memory content against an internal record (UID-derived XOR/CRC, ch. 13-14). Confirmed by capturing the command sequences (`CC F0 00 00` / `CC F0 40 00` / `33`) in the harness's 1-Wire slave.
 
-以前 15章で「IDChip = PD5/PD6 の I2C」としていたのは誤りで、PD5/PD6 は加速度センサー、IDChip は PB11 の 1-Wire だった。
+Previously ch. 15 stated "IDChip = I2C on PD5/PD6", which was wrong; PD5/PD6 are the accelerometer, and the IDChip is 1-Wire on PB11.
 
-#### 認証の構造と偽造可能性 (ハーネスで解析)
+#### Authentication structure and forgeability (analyzed with the harness)
 
-認証 `0x08003D64` は状態語 `0x200000C0` の 4 ビットが全て立ち、かつ UID キー照合 `0x080056A4` (r5≠0) で通過する (13-14章)。ハーネスで memcmp (`0x08001200`) / CRC (`0x080013E0`) を捕捉して各ビットの条件を特定した:
+Authentication `0x08003D64` passes when all 4 bits of the status word `0x200000C0` are set and the UID key match `0x080056A4` (r5≠0) holds (ch. 13-14). We identified each bit's condition by capturing memcmp (`0x08001200`) / CRC (`0x080013E0`) in the harness:
 
-| ビット | 判定 | IDChip との関係 |
+| Bit | Decision | Relation to the IDChip |
 | --- | --- | --- |
-| bit0 | レコード CRC (`0x08003DC6`、34B) | 無し (内部レコード) |
-| bit1 | 派生構造の CRC (60B) | メモリ内容が混ざる |
-| bit2 | `memcmp(内部 UID 由来値, 復号したメモリ由来値)` | **IDChip メモリ (1-Wire) を鍵付きで変換した 12B が UID と一致する必要** |
-| bit3 | `memcmp(復号したメモリ由来値, ROM)` | **ROM が「メモリ由来の期待値」と一致する必要** |
+| bit0 | Record CRC (`0x08003DC6`, 34B) | None (internal record) |
+| bit1 | Derived-structure CRC (60B) | Memory content is mixed in |
+| bit2 | `memcmp(internal UID-derived value, decrypted memory-derived value)` | **The 12B produced by a keyed transform of the IDChip memory (1-Wire) must match the UID** |
+| bit3 | `memcmp(decrypted memory-derived value, ROM)` | **The ROM must match the "memory-derived expected value"** |
 
-- **bit3 は偽造できた**: ROM に「認証が期待する 8B」を入れれば通る (ハーネスで期待値を観測し ROM に設定 → bit3 成立)。
-- **bit2 は単純な値置換では偽造できない**: 照合対象の 12B は 1-Wire メモリから **ROM/シリアルを鍵にしたスクランブル + 復号**を経て作られ、鍵がメモリ内容自体に依存する (メモリの既知スロットに UID を置いても照合値が変わらない)。つまり **鍵付きの本物のアンチクローン**で、完全な偽造にはメモリのデスクランブル/鍵導出の逆解析が必要。`bl_emu.py` の `run_auth()` と 1-Wire スレーブ (`OneWire`、ROM/メモリ差し替え可) がその作業の土台になる。
+- **bit3 could be forged**: it passes if you put the "8B the authentication expects" into the ROM (observed the expected value in the harness and set it into the ROM → bit3 holds).
+- **bit2 cannot be forged by simple value substitution**: the 12B to be matched is produced from the 1-Wire memory via **a scramble keyed by the ROM/serial + decryption**, and the key depends on the memory content itself (placing the UID in a known slot of the memory does not change the match value). That is, it is **a keyed, genuine anti-clone**, and a full forgery requires reverse-analysis of the memory descramble/key derivation. `bl_emu.py`'s `run_auth()` and its 1-Wire slave (`OneWire`, ROM/memory swappable) provide the foundation for that work.
 
-## 免責## 免責
+## Disclaimer
 
-本メモは静的解析とエミュレーションに基づく推定を含む。実機で検証した項目はその旨を明記している。
-ファームウェアの改変は自己責任で。特にヒーター制御と安全装置 (過熱しきい値、抵抗値チェック、450℃上限) には手を触れないこと。
+These notes contain inferences based on static analysis and emulation. Items verified on the actual device are noted as such.
+Modifying the firmware is at your own risk. In particular, do not touch the heater control and safety devices (overheat thresholds, resistance check, 450℃ cap).

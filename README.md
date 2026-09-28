@@ -1,152 +1,137 @@
 # ts1m_fw_mod
 
-MINIWARE TS1M はんだごてステーションのファームウェア解析と改造の記録。
+> Japanese version: [README.ja.md](README.ja.md)
 
-対象ファーム: `TS1MAPPV202` (`TS1M_Master_APP_V202_EN.hex` / `_CN.hex`、画面表示は `SWVer: 2.2`)
+Reverse-engineering notes and firmware mods for the MINIWARE TS1M soldering-iron station.
 
-## 現状
+Target firmware: `TS1MAPPV202` (`TS1M_Master_APP_V202_EN.hex` / `_CN.hex`; the on-screen version reads `SWVer: 2.2`).
 
-解析は進行中。ファームの構造、こて先判定ロジック、設定項目、DFU 書き込みの制約までは判明している。
-パッチを当てて任意コードを実行させる手法も実機で動作確認済み。
+## Status
 
-温度関連の RAM 変数 (現在温度・目標温度・動作モード) とビープの鳴らし方をエミュレーションで特定し、
-目標温度到達通知・自動ブースト・ブースト表示のパッチ (`patches/`) を作成した。
-**実機で動作確認済み** (2026-09-27)。エミュレーション (仮想パネルでの画面確認を含む) でも確認している。
+Analysis is ongoing. The firmware structure, the tip-detection logic, the settings, and the constraints on DFU flashing are understood. A technique for patching in and running arbitrary code has been verified on the device.
 
-DFU ドライブのファイルが外部 SPI フラッシュ上にあることを突き止め、そこを経由して**ブートローダを実機から吸い出し、解析した** (ANALYSIS.md 13・14章)。
-起動判定・アンチクローン (UID + 外部 IDChip)・DFU の HEX 検査/書き込み経路・こて先ファーム更新までを把握した。
+The temperature-related RAM variables (current temperature, target temperature, work mode) and how to sound the beeper were identified through emulation, and a patch (`patches/`) that adds a target-reached beep, auto boost, and a boost indicator was built. **Verified on the device** (2026-09-27). It is also confirmed in emulation (including on-screen checks via the virtual panel).
 
-- [ANALYSIS.md](ANALYSIS.md) — ファーム本体の解析結果
-- [EMULATION.md](EMULATION.md) — Unicorn によるエミュレーションの手順と知見
-- [ts1m_emu.py](ts1m_emu.py) — アプリのエミュレータハーネス
-- [bl_emu.py](bl_emu.py) — ブートローダのエミュレータハーネス (IDChip 1-Wire / 加速度センサー I2C をモデル化)
-- [hex2bin.py](hex2bin.py) — Intel HEX → raw binary 変換
-- [patches/](patches/) — 目標温度到達通知 + 自動ブースト + ブースト表示のパッチ (ANALYSIS.md 11章)、診断パッチ (チップ ID、DFU ファイル探索、ブートローダ吸い出し)
+By finding that files on the DFU drive live in the external SPI flash, the **bootloader was dumped from the device through that path and analyzed** (ANALYSIS.md ch. 13-14). The boot decision, the anti-clone check (UID + external IDChip), the DFU HEX check/program path, and the soldering-iron firmware update were all worked out.
 
-## 分かっていること (要点)
+- [ANALYSIS.md](ANALYSIS.md) — analysis of the firmware itself
+- [EMULATION.md](EMULATION.md) — Unicorn emulation procedure and findings
+- [ts1m_emu.py](ts1m_emu.py) — the application emulator harness
+- [bl_emu.py](bl_emu.py) — the bootloader emulator harness (models the IDChip 1-Wire and the accelerometer I2C)
+- [hex2bin.py](hex2bin.py) — Intel HEX → raw binary converter
+- [patches/](patches/) — the target-reached beep + auto boost + boost indicator patch (ANALYSIS.md ch. 11), and diagnostic patches (chip ID, DFU file search, bootloader dump)
 
-- MCU は **WCH CH32F208WBU6** (Cortex-M3、QFN68、96MHz)。SDK ドライバとピン配置から推定し、実機のチップ ID `0x2080043C` で確定。Keil ビルド
-- アプリは `0x08010000`〜`0x080773C4`。ブートローダ (`0x08000000`〜`0x0800FFFF`) は配布物に含まれないが、実機から吸い出した
-- こて先は 245 / 210 / 115 / H100 に対応。**210 と 115 は電気的に区別せず手動選択**
-- `TS80P` の種類コードは存在するが**到達不能**
-- 起動時に チップ UID を照合し、不一致なら `Demo Mode` で停止する
-- 工場検査モードは、工場校正レコードが壊れている場合のみ自動で起動する
-- **エミュレータ上でメインループまで起動でき、UART デバッグ出力が取得できる**
-- 現在温度 `0x2000023E`、PID の目標温度 `0x200001F4`、動作モード `0x2000023C` (0.1℃単位。エミュレーションで特定し、パッチの実機動作で裏付け)
-- ビープはブザーオブジェクト `0x20000330` の `beep(pattern)` (`0x08012219`) で鳴らす
-- 以前フック置き場にしていた `0x0802AFC4` は空きではなくビットマップの一部だった。未使用の FatFs テスト関数 `0x0802849C` (348 B) を使う
-- 文字列描画は `drawString(str, x, y, font, fg, bg, flag)` (`0x08014834`、色は RGB565 でスタック渡し)
-- UI はページ構造。加熱画面 (ページ 1) に入ると動作モードが作業になる
-- 設定ファイル `TS1M.TXT` は外部 SPI フラッシュ (W25Q64、SPI2) の FatFs ボリューム上にある。エミュレータにもモデルを入れた
-- DFU ドライブと設定ファイルは同じ SPI フラッシュ上の**別々の FAT 領域** (設定 = base `0x000000`、DFU = base `0x200000`)。互いに消し合わないので両方永続する (MARK.BIN は `0x247000` から 64KB 連続、エミュレーションで実測)
-- ADC: ch10 = こて先熱電対、ch12 = 冷接点、ch13 = 電源電圧、ch0 = 外部熱電対 (校正モード CAL で使用)
-- MCU のピン/周辺の全体マップを両ファームから作成 (ANALYSIS.md 15章)。ヒーター=**PA1 (TIM5_CH2)**、表示=SPI1 (SCK PA5/MOSI PA7/DC PB0/BL PA8)、フラッシュ=SPI2 (PB12-15)、こて先=USART2 (PA2/PA3)、ブザー=TIM4/PB8、ADC1 入力=PA0/PA4/PC0-4、MUX 選択 7 本、IDChip 認証=PB11 の 1-Wire、加速度センサー=PD5/PD6 の I2C。リマップ・EXTI は無し
-- 設定メニューには隠し項目がある: QkTmp (BoostTemp) と RGB 照明 (RGB FX / Mode / Bright / Red / Green / Blue)。RGB の値で LED を駆動する処理は無い
-- 華氏モードでは CalibraVal が絶対温度として換算され、0 のままだと表示が約 4.9% 高く出る可能性がある (実機未確認)
+## What is known (summary)
 
-## パッチ
+- The MCU is a **WCH CH32F208WBU6** (Cortex-M3, QFN68, 96 MHz). Inferred from the SDK drivers and pinout, then confirmed by the device's chip ID `0x2080043C`. Keil build.
+- The app spans `0x08010000`-`0x080773C4`. The bootloader (`0x08000000`-`0x0800FFFF`) is not part of the distribution but was dumped from the device.
+- Tips supported: 245 / 210 / 115 / H100. **210 and 115 are not distinguished electrically and are selected manually.**
+- A `TS80P` type code exists but is **unreachable**.
+- At boot the chip UID is checked; on a mismatch it stops with `Demo Mode`.
+- The factory test mode starts automatically only when the factory calibration record is corrupted.
+- **The emulator boots to the main loop and captures the UART debug output.**
+- Current temperature `0x2000023E`, PID target temperature `0x200001F4`, work mode `0x2000023C` (units of 0.1 °C; identified in emulation and backed by the patch running on the device).
+- The beep is sounded via the buzzer object `0x20000330`'s `beep(pattern)` (`0x08012219`).
+- The `0x0802AFC4` area previously used as a hook site was not free — it was part of a bitmap. Use the unused FatFs test function `0x0802849C` (348 B) instead.
+- String drawing is `drawString(str, x, y, font, fg, bg, flag)` (`0x08014834`; colors are RGB565 passed on the stack).
+- The UI is page-structured. Entering the heat screen (page 1) puts the work mode into working state.
+- The settings file `TS1M.TXT` lives on a FatFs volume in the external SPI flash (W25Q64, SPI2). The emulator has a model of it.
+- The DFU drive and the settings file are **separate FAT regions** on the same SPI flash (settings = base `0x000000`, DFU = base `0x200000`). They do not clobber each other, so both persist (MARK.BIN was 64 KB contiguous from `0x247000`; measured in emulation).
+- ADC: ch10 = tip thermocouple, ch12 = cold junction, ch13 = supply voltage, ch0 = external thermocouple (used in calibration mode CAL).
+- A full pin/peripheral map of the MCU was built from both firmwares (ANALYSIS.md ch. 15). Heater = **PA1 (TIM5_CH2)**, display = SPI1 (SCK PA5 / MOSI PA7 / DC PB0 / BL PA8), flash = SPI2 (PB12-15), tip link = USART2 (PA2/PA3), buzzer = TIM4/PB8, ADC1 inputs = PA0/PA4/PC0-4, 7 analog-mux select lines, IDChip auth = 1-Wire on PB11, accelerometer = I2C on PD5/PD6. No remaps, no EXTI.
+- The settings menu has hidden items: QkTmp (BoostTemp) and RGB lighting (RGB FX / Mode / Bright / Red / Green / Blue). There is no code that drives an LED from the RGB values.
+- In Fahrenheit mode CalibraVal is converted as an absolute temperature; left at 0, the reading may come out about 4.9 % high (not verified on the device).
+
+## Patches
 
 ```
 python3 patches/build.py              # -> TS1M_Master_APP_V202_EN_notify_boost.hex / .bin
-python3 patches/test_notify_boost.py  # エミュレータでのシナリオ試験 (数分)
-python3 patches/screenshot.py         # 加熱画面を仮想パネルに描画 (通常 / ブースト中、数分)
+python3 patches/test_notify_boost.py  # scenario test on the emulator (a few minutes)
+python3 patches/screenshot.py         # render the heat screen on the virtual panel (normal / boosting, a few minutes)
 ```
 
-| 機能 | 動作 |
+| Feature | Behavior |
 | --- | --- |
-| 目標温度到達通知 | 設定温度の ±3.0℃ に初めて入ったら 2回ビープ。設定変更・スリープ復帰で再び有効 |
-| 自動ブースト | 一度到達した後、10.0℃ 以上低い状態が 300ms 続いたら目標を +20.0℃ (上限 450℃)。回復で終了、20秒で打ち切り |
-| ブースト表示 | ブースト中は加熱画面の現在温度の数字が白から赤になる (7セグ風表示ではピンク寄り) |
+| Target-reached beep | Beeps twice the first time the temperature enters ±3.0 °C of the set point. Re-armed on a setting change or wake from sleep. |
+| Auto boost | After the target has been reached once, if it stays 10.0 °C or more below for 300 ms, raise the target by +20.0 °C (capped at 450 °C). Ends on recovery, gives up after 20 s. |
+| Boost indicator | While boosting, the current-temperature digits on the heat screen turn from white to red (pinkish in the 7-segment style). |
 
-### 画面 (ブースト表示)
+### Screen (boost indicator)
 
-エミュレータの仮想パネルで描画した加熱画面 (`python3 patches/screenshot.py docs/images` で再生成できる)。
-現在温度の数字はエミュレーションでは更新されないため `000` のまま。
+The heat screen rendered on the emulator's virtual panel (regenerate with `python3 patches/screenshot.py docs/images`). The current-temperature digits stay `000` because they are not updated in emulation.
 
-| | 通常 | ブースト中 |
+| | Normal | Boosting |
 | --- | --- | --- |
-| 通常表示 | ![通常表示・通常](docs/images/heat_normal.png) | ![通常表示・ブースト中](docs/images/heat_boost.png) |
-| 7セグ風表示 | ![7セグ風・通常](docs/images/heat7_normal.png) | ![7セグ風・ブースト中](docs/images/heat7_boost.png) |
+| Default style | ![default/normal](docs/images/heat_normal.png) | ![default/boosting](docs/images/heat_boost.png) |
+| 7-segment style | ![7-seg/normal](docs/images/heat7_normal.png) | ![7-seg/boosting](docs/images/heat7_boost.png) |
 
-- 変更箇所は 3つの 4バイト命令 (`bl` への置換) と、未使用関数の領域に置いたフック本体だけ
-- ブーストで上げた目標は PID 呼び出しの間だけ使い、すぐ元に戻す。ヒーター制御と安全装置のコードには触れていない
-- パラメータ (しきい値・上昇幅・表示色) は `patches/notify_boost.S` 先頭の `.equ` で変更できる
-- 元 HEX の該当行だけを書き換えるので、行数と構造は元と同じ
+- The only changes are three 4-byte instructions (replaced with `bl`) plus the hook body placed in the area of an unused function.
+- The boosted target is used only during the PID call and restored immediately. The heater control and safety code are not touched.
+- The parameters (thresholds, boost amount, indicator color) can be changed via the `.equ` values at the top of `patches/notify_boost.S`.
+- Only the affected lines of the original HEX are rewritten, so the line count and structure match the original.
 
-### 診断パッチ: チップ ID 表示
+### Diagnostic patch: chip ID display
 
 ```
 python3 patches/build.py -p chipid    # -> TS1M_Master_APP_V202_EN_chipid.hex
 ```
 
-ホーム画面左上のこて先名 ("245" など) の代わりに、チップ ID (`0x1FFFF704`) を 16進8桁で表示する。
-ヒーター制御には触れない。確認後は元のファーム (または notify_boost 版) を書き戻す。
-notify_boost と同じ空き領域を使うので、両方を同時には入れられない。
+Instead of the tip name at the top left of the home screen ("245", etc.), it shows the chip ID (`0x1FFFF704`) as 8 hex digits. It does not touch the heater control. After checking, flash back the original firmware (or the notify_boost version). It uses the same free area as notify_boost, so the two cannot be installed at once.
 
-| 表示 | チップ (WCH SDK `DBGMCU_GetCHIPID` の一覧) |
+| Display | Chip (from the WCH SDK `DBGMCU_GetCHIPID` list) |
 | --- | --- |
-| `208004xC` | CH32F208WBU (QFN68)。**TS1M 実機の値は `2080043C`** |
+| `208004xC` | CH32F208WBU (QFN68). **The value on the TS1M device is `2080043C`.** |
 | `208104xC` | CH32F208RBT (LQFP64) |
 | `203...` / `205...` / `207...` | CH32F203 / F205 / F207 |
 
-(x はリビジョン)
+(x is the revision)
 
-### 診断パッチ: DFU ドライブ上のファイル位置 (MARK.BIN)
+### Diagnostic patch: file location on the DFU drive (MARK.BIN)
 
 ```
 python3 patches/build.py -p findmark  # -> TS1M_Master_APP_V202_EN_findmark.hex
 ```
 
-DFU のマスストレージに書き込んだファイルが外部 SPI フラッシュ (W25Q64) のどこに置かれるかを調べる。
-`MARK.BIN` (16 バイトの行 `TS1M-FINDVOL-MK\n` を 64KB 分並べたもの) を DFU ドライブにコピーしてから、
-このパッチを書き込む。
-MARK.BIN は `python3 -c "open('MARK.BIN','wb').write(b'TS1M-FINDVOL-MK\n'*4096)"` で作れる。起動するとフラッシュ 8MB を 512 バイト境界ごとに調べ、ホーム画面左上のこて先名の位置に表示する。
+Finds where a file written to the DFU mass storage lands in the external SPI flash (W25Q64). Copy `MARK.BIN` (the 16-byte line `TS1M-FINDVOL-MK\n` repeated to fill 64 KB) onto the DFU drive, then flash this patch. MARK.BIN can be made with `python3 -c "open('MARK.BIN','wb').write(b'TS1M-FINDVOL-MK\n'*4096)"`. At boot it scans the 8 MB flash at every 512-byte boundary and displays the result where the tip name would be at the top left of the home screen.
 
-| 表示 | 意味 |
+| Display | Meaning |
 | --- | --- |
-| `AAAAAA:CC` | 最初に一致したアドレス (16進6桁) と、一致した 512B セクタの数 (最大 `FF`)。64KB が連続していれば `80` |
-| `FFFFFF:00` | 見つからない |
-| `--------` | SPI2 が未初期化でスキャンしなかった |
+| `AAAAAA:CC` | First matching address (6 hex digits) and the number of matching 512 B sectors (max `FF`). Contiguous 64 KB = `80`. |
+| `FFFFFF:00` | Not found |
+| `--------` | SPI2 not initialized, so nothing was scanned |
 
-スキャンはラベルを描画するたび (起動時とページの再描画時だけ) に行い、数百 ms かかる。ヒーター制御には触れない。
-その間ウォッチドッグ (約 3.2 秒) はファーム自身のリロード関数で給餌する。
+The scan runs each time the label is drawn (only at boot and on page redraws) and takes a few hundred ms. It does not touch the heater control. During the scan the watchdog (~3.2 s) is fed by the firmware's own reload function.
 
-実機では `247000:80` (0x247000 から 64KB 連続) と表示された。
+On the device it displayed `247000:80` (64 KB contiguous from 0x247000).
 
-### 診断パッチ: ブートローダの吸い出し (MARK.BIN に上書き)
+### Diagnostic patch: dumping the bootloader (overwrite MARK.BIN)
 
 ```
 python3 patches/build.py -p dumpboot  # -> TS1M_Master_APP_V202_EN_dumpboot.hex
 ```
 
-findmark で見つけた MARK.BIN の実体 (SPI フラッシュ `0x247000`〜`0x256FFF`) を、内蔵フラッシュの
-ブートローダ (`0x08000000`〜`0x0800FFFF`、64KB) で上書きする。その後 DFU ドライブから MARK.BIN をコピーすれば、
-ブートローダのイメージが得られる。
+Overwrites the MARK.BIN payload found by findmark (SPI flash `0x247000`-`0x256FFF`) with the internal-flash bootloader (`0x08000000`-`0x0800FFFF`, 64 KB). Then copying MARK.BIN off the DFU drive yields the bootloader image.
 
-その 64KB が**すべてマーカーのとき**だけ、4KB セクタ 16 個の消去と書き込みを行い、読み戻して照合する。
-それ以外の内容なら何も書かない。書き込み後の起動では照合だけを行う。
+Only when those 64 KB are **all the marker** does it erase and program the 16 × 4 KB sectors, then read back and verify. Anything else, it writes nothing. On later boots it only re-verifies.
 
-| 表示 | 意味 |
+| Display | Meaning |
 | --- | --- |
-| `OK` | `0x247000` の 64KB がブートローダと一致 (書き込み済み・照合済み) |
-| `NG:0` | SPI2 が未初期化で何もしなかった |
-| `NG:1` | マーカーでもブートローダでもない内容だったので、何も書かなかった |
-| `NG:2` | 書き込んだが、読み戻した内容が一致しない |
+| `OK` | The 64 KB at `0x247000` matches the bootloader (written and verified) |
+| `NG:0` | SPI2 not initialized, nothing done |
+| `NG:1` | Content was neither the marker nor the bootloader, so nothing was written |
+| `NG:2` | Written, but the read-back does not match |
 
-ブートローダには UID 照合用のキー (`0x0800FFF0`) も含まれる。
-実機で `OK` を確認し、DFU ドライブから MARK.BIN を取り出してブートローダ 64KB を得た (リポジトリには含めない)。
+The bootloader also contains the per-device UID key (`0x0800FFF0`). On the device, `OK` was confirmed and MARK.BIN was copied off the DFU drive to obtain the 64 KB bootloader (not included in the repo).
 
-## DFU 書き込み
+## DFU flashing
 
-本体を USB マスストレージにして HEX をコピーする方式。コード領域・文字列領域とも書き込みは反映される。
+The device becomes a USB mass-storage device and the HEX is copied onto it. Writes to both the code area and the string area take effect.
 
-HEX 全体を再シリアライズすると反映されない可能性を疑っているが、**未確認**。
-詳細は ANALYSIS.md の「7. DFU 書き込みについて」を参照。
+There was a suspicion that re-serializing the whole HEX might not take effect, but that is **now resolved**: the bootloader's check pass rejects lines whose length or line endings differ (see ANALYSIS.md "7. About DFU flashing" and ch. 14).
 
-## エミュレーション
+## Emulation
 
-`ts1m_emu.py` で Unicorn 上に起動できる。UART デバッグログが丸ごと取れるので、
-SWD が無い状況では最も情報量の多い手段。
+`ts1m_emu.py` boots it under Unicorn. Since the whole UART debug log can be captured, this is the most informative method when SWD is unavailable.
 
 ```
 pip install unicorn capstone
@@ -154,24 +139,22 @@ python3 hex2bin.py TS1M_Master_APP_V202_EN.hex
 python3 ts1m_emu.py
 ```
 
-UID 照合の回避、周辺レジスタのモデル化、Unicorn 側の落とし穴 (読み出しフックが効かない、
-書き込みフックで異常終了する) については EMULATION.md にまとめてある。
+Bypassing the UID check, modeling the peripheral registers, and the Unicorn pitfalls (read hooks do not work, write hooks abort abnormally) are summarized in EMULATION.md.
 
-主なオプション:
+Main options:
 
-| オプション | 内容 |
+| Option | Description |
 | --- | --- |
-| `force_tip` / `skip_res` | こて先判定を固定し、抵抗値チェックを飛ばす |
-| `defaults=True` | 設定の初期値・温度校正・電源電圧校正を入れる (無いと温度も電圧も 0) |
-| `work_mode=True` | ヒーターを作業状態に保ち、毎周測定と PID を走らせる |
-| `lcd=True` | パネルへの送信を 320×172 のフレームバッファに再現し、`save_png()` で画像にする |
-| `spi_flash` | 外部 SPI フラッシュ (W25Q64) を模擬。設定を実際の TS1M.TXT 経由で読む (`--make-flash` / `--flash`) |
-| `adc_hook` | 測定点ごとに ADC 値を注入する |
-| `sim_measure=True` | 測定/加熱サイクルを駆動し、ヒーター (PA1/TIM5_CH2) を実機同様にトグルさせる |
+| `force_tip` / `skip_res` | Fix the tip type and skip the resistance check |
+| `defaults=True` | Load the default settings, temperature calibration, and supply-voltage calibration (without them, both temperature and voltage read 0) |
+| `work_mode=True` | Keep the heater in working state so every pass measures and runs the PID |
+| `lcd=True` | Reproduce what is sent to the panel in a 320×172 frame buffer; export with `save_png()` |
+| `spi_flash` | Model the external SPI flash (W25Q64). Read settings via the actual TS1M.TXT (`--make-flash` / `--flash`) |
+| `adc_hook` | Inject an ADC value per measurement point |
+| `sim_measure=True` | Drive the measure/heat cycle so the heater (PA1/TIM5_CH2) toggles as on the device |
 
-GPIO・タイマ・UART の状態も追跡する: `e.pin('PA1')` / `e.pin_mode('PC4')` / `e.pins()`、`e.heater_on` / `e.heater_log`、`e.buzzer_duty` / `e.backlight_duty`、`e.uart_tx[2]` (USART2) / `e.uart_tx[4]` (UART4)。`python3 ts1m_emu.py --sim -q` で一覧を表示 (ANALYSIS.md 15章、EMULATION.md)。
+It also tracks GPIO / timer / UART state: `e.pin('PA1')` / `e.pin_mode('PC4')` / `e.pins()`, `e.heater_on` / `e.heater_log`, `e.buzzer_duty` / `e.backlight_duty`, `e.uart_tx[2]` (USART2) / `e.uart_tx[4]` (UART4). `python3 ts1m_emu.py --sim -q` prints a summary (ANALYSIS.md ch. 15, EMULATION.md).
 
-## 注意
+## Caution
 
-ファームウェアの改変は自己責任で。ヒーター制御と安全装置 (過熱しきい値、抵抗値チェック、450℃上限) には手を触れないこと。
-実機で試す前に、必ず元のファームウェアを書き戻せる状態を確保すること。
+Modifying firmware is at your own risk. Do not touch the heater control or the safety mechanisms (overheat threshold, resistance check, 450 °C cap). Before trying anything on the device, always make sure you can flash the original firmware back.
