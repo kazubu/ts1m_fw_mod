@@ -38,7 +38,7 @@ DFU ドライブのファイルが外部 SPI フラッシュ上にあること�
 - 文字列描画は `drawString(str, x, y, font, fg, bg, flag)` (`0x08014834`、色は RGB565 でスタック渡し)
 - UI はページ構造。加熱画面 (ページ 1) に入ると動作モードが作業になる
 - 設定ファイル `TS1M.TXT` は外部 SPI フラッシュ (W25Q64、SPI2) の FatFs ボリューム上にある。エミュレータにもモデルを入れた
-- DFU ドライブに置いたファイルも外部 SPI フラッシュ上にある (MARK.BIN は `0x247000` から 64KB 連続)
+- DFU ドライブと設定ファイルは同じ SPI フラッシュ上の**別々の FAT 領域** (設定 = base `0x000000`、DFU = base `0x200000`)。互いに消し合わないので両方永続する (MARK.BIN は `0x247000` から 64KB 連続、エミュレーションで実測)
 - ADC: ch10 = こて先熱電対、ch12 = 冷接点、ch13 = 電源電圧、ch0 = 外部熱電対 (校正モード CAL で使用)
 - MCU のピン/周辺の全体マップを両ファームから作成 (ANALYSIS.md 15章)。ヒーター=**PA1 (TIM5_CH2)**、表示=SPI1 (SCK PA5/MOSI PA7/DC PB0/BL PA8)、フラッシュ=SPI2 (PB12-15)、こて先=USART2 (PA2/PA3)、ブザー=TIM4/PB8、ADC1 入力=PA0/PA4/PC0-4、MUX 選択 7 本、IDChip 認証=PB11 の 1-Wire、加速度センサー=PD5/PD6 の I2C。リマップ・EXTI は無し
 - 設定メニューには隠し項目がある: QkTmp (BoostTemp) と RGB 照明 (RGB FX / Mode / Bright / Red / Green / Blue)。RGB の値で LED を駆動する処理は無い
