@@ -24,7 +24,7 @@ DFU ドライブのファイルが外部 SPI フラッシュ上にあること�
 - [bl_emu.py](bl_emu.py) — ブートローダのエミュレータハーネス (IDChip 1-Wire / 加速度センサー I2C をモデル化)
 - [pid_sim.py](pid_sim.py) — ヒーター PID の熱モデルシミュレーション (ファームの PID を Unicorn で実行。ANALYSIS.ja.md 10章)
 - [hex2bin.py](hex2bin.py) — Intel HEX → raw binary 変換
-- [patches/](patches/) — 目標温度到達通知 + 自動ブースト + ブースト表示のパッチ (ANALYSIS.ja.md 11章)、PID のオーバーシュート修正 (10章)、診断パッチ (チップ ID、DFU ファイル探索、ブートローダ吸い出し)
+- [patches/](patches/) — 目標温度到達通知 + 自動ブースト + ブースト表示のパッチ (ANALYSIS.ja.md 11章)、PID のオーバーシュート修正と表示の目標値固定の解除 (10章)、診断パッチ (チップ ID、DFU ファイル探索、ブートローダ吸い出し)
 
 ## 分かっていること (要点)
 
@@ -95,6 +95,16 @@ PID (`0x08015494`) の 2 命令を `nop` に置き換える (ANALYSIS.ja.md 10�
 - 210 / 115 (Kd ≈ 0) では D の変更は効かない
 - **ヒーター制御の変更**である (過熱保護・抵抗値チェック・450℃ 上限には触れていない)。**実機では未確認**なので、最初の昇温は温度を見ながら試すこと
 - 空き領域を使わないバイトパッチなので `notify_boost` と組み合わせられる
+
+### 表示修正: 常に実測温度を表示 (`no_snap`、実機未確認)
+
+```
+python3 patches/build.py -p no_snap                        # -> TS1M_Master_APP_V202_EN_no_snap.hex / .bin
+python3 patches/build.py -p notify_boost,pid_fix,no_snap   # 3 つとも
+python3 patches/test_no_snap.py                            # エミュレータでの確認 (数分)
+```
+
+加熱画面は、読みが目標の −1.8〜+1.7℃ に入ると実測値の代わりに目標値を表示する。`no_snap` はこれを外す (4 バイトの代入 3 か所 → `nop.w`: 作業中の通常表示・7セグ風表示、スリープ中)。目標付近では 299 / 300 / 301 のように実際の読みが見える。表示だけの変更で、PID・目標温度・安全装置には触れない。`pid_fix` の効果を実機で見るのに向く (ANALYSIS.ja.md 10章)。
 
 ### 診断パッチ: チップ ID 表示
 

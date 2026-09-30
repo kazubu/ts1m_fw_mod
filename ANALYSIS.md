@@ -440,7 +440,16 @@ The heater control `0x080214A0` runs each cycle as follows.
 
 Since the target temperature is rewritten every cycle, if you rewrite it only just before the PID call, it affects only that cycle's control.
 
-The display uses a moving average (`0x20009DD4`, `0x0801EE00` = total/count), and shows the target value if within ±1.8℃ of the target.
+The display uses a moving average (`0x20009DD4`, `0x0801EE00` = total/count, refreshed every 5 draws), and shows the target value if within ±1.8℃ of the target
+(exactly `target − 18 ≤ shown < target + 18`). This is display only; the PID never sees it. The snap is a 4-byte store at three sites of the heat screen:
+
+| Site | Screen |
+| --- | --- |
+| `0x0801F9E4` `strh.w r0, [r2, #118]` | Working, default style (heat page draw `0x0801F4FC`) |
+| `0x0801B1D8` `strh.w r0, [r7, #122]` | Working, 7-segment style (`0x0801B010`, called from the same draw function) |
+| `0x0801F6A0` `strh.w r0, [r6, #118]` | Sleeping (`MODE == 2`), either style; the target is SleepTemp |
+
+`python3 patches/build.py -p no_snap` replaces the three stores with `nop.w`, so the measured average is always shown (checked by `patches/test_no_snap.py`).
 
 ### Inside the PID function (`0x08015494`)
 
@@ -516,6 +525,31 @@ The recommended fix for 245 is two instructions, built as `python3 patches/build
 | --- | --- | --- | --- |
 | `0x0801559A` | `4ff0000a` (`mov.w sl, #0`) | `aff30080` (`nop.w`) | Keep D active while approaching |
 | `0x080155B4` | `01d9` (`bls`) | `00bf` (`nop`) | No P dead band |
+
+### Why the PID looks like this (speculation)
+
+Nothing in the code states the design intent; this is read from its structure. It looks less like an analytically designed PID
+and more like one grown by adding conditions on the bench, toward product goals: fast heat-up and a steady display.
+
+| Quirk | Likely reason |
+| --- | --- |
+| D off while approaching from below | D brakes on the approach and slows heat-up. The heat-up time spec was probably preferred |
+| P dead band (−4 to +5℃) | The thermocouple reading is noisy, and with Kp = 1.0 noise goes straight into the output. Holding with I only near the target keeps the output quiet. Together with the display showing the target when within ±1.8℃, this makes the reading look rock steady |
+| D strong only while an overshoot grows | Positive D is capped at +20, negative D is not: D looks like an emergency brake added later |
+| Small integral factor far from the target (per tip) | Conditional integration, a common anti-windup; the factors look measured per tip |
+| Integral reset beyond +6℃ | A stopgap: drop the integral when the overshoot gets large |
+| Integral only every 6th pass above target | Perhaps meant to avoid an undershoot after an overshoot, but it prolongs the overshoot |
+
+Signs of bench tuning:
+
+- The integral limit 3000 does not match the output range: with Ki = 0.2 the I term reaches 600 against an output limit of 290. It may be reused from the temperature unit (300.0℃ = 3000) rather than derived
+- The gains vary per tip without a pattern; 210 has Kd = 0.03 (practically 0) and 115 has Kd = 0
+- Double-precision constants (0.1, 0.001) mixed with float gains, typical of C literals written without `f`; many debug `printf`s remain
+
+The manufacturer may not see the overshoot as a problem. The PID sees the thermocouple next to the heater, and the tip end lags it,
+so a reading of 315℃ does not necessarily mean the tip end reaches 315℃. If the tuning was checked with an external tip thermometer
+("tip at about 300℃, heat-up in N s"), the internal overshoot may have been accepted. The user still sees 315℃ on the display.
+Logging an external tip thermometer together with the display would test this, and would also let the thermal model in `pid_sim.py` be fitted.
 
 ### Buzzer
 

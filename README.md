@@ -20,7 +20,7 @@ By finding that files on the DFU drive live in the external SPI flash, the **boo
 - [bl_emu.py](bl_emu.py) — the bootloader emulator harness (models the IDChip 1-Wire and the accelerometer I2C)
 - [pid_sim.py](pid_sim.py) — thermal-model simulation of the heater PID (runs the firmware PID in Unicorn; ANALYSIS.md ch. 10)
 - [hex2bin.py](hex2bin.py) — Intel HEX → raw binary converter
-- [patches/](patches/) — the target-reached beep + auto boost + boost indicator patch (ANALYSIS.md ch. 11), the PID overshoot fix (ch. 10), and diagnostic patches (chip ID, DFU file search, bootloader dump)
+- [patches/](patches/) — the target-reached beep + auto boost + boost indicator patch (ANALYSIS.md ch. 11), the PID overshoot fix and the display snap removal (ch. 10), and diagnostic patches (chip ID, DFU file search, bootloader dump)
 
 ## What is known (summary)
 
@@ -90,6 +90,16 @@ Two instructions in the PID (`0x08015494`) are replaced by `nop` (ANALYSIS.md ch
 - For 210 / 115 (Kd ≈ 0) the D change does nothing.
 - It **changes heater control** (overheat protection, resistance check and the 450 °C cap are untouched). It has **not been tried on the device**; watch the temperature on the first heat-up.
 - A byte patch that does not use the free area, so it can be combined with `notify_boost`.
+
+### Display fix: always show the measured temperature (`no_snap`, not verified on the device)
+
+```
+python3 patches/build.py -p no_snap                        # -> TS1M_Master_APP_V202_EN_no_snap.hex / .bin
+python3 patches/build.py -p notify_boost,pid_fix,no_snap   # all three
+python3 patches/test_no_snap.py                            # emulator check (a few minutes)
+```
+
+The heat screen shows the target instead of the measured value while the reading is within −1.8 to +1.7 °C of it. `no_snap` removes that (three 4-byte stores → `nop.w`: working default style, working 7-segment style, sleep), so the display shows the real reading, e.g. 299 / 300 / 301 around the target. Display only: the PID, the target and the safety code are untouched. Useful for seeing what `pid_fix` actually does (ANALYSIS.md ch. 10).
 
 ### Diagnostic patch: chip ID display
 

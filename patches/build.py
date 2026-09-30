@@ -7,6 +7,8 @@ Build a patched TS1M HEX from one of the patch sources in this directory.
     PATCH  notify_boost (default)  target-reached beep, auto boost, boost indicator
            pid_fix                 PID: keep D active while approaching, no P dead band
                                    (in-place byte patch, 2 instructions)
+           no_snap                 show the measured temperature even within -1.8..+1.7
+                                   of the target (in-place byte patch, 3 instructions)
            chipid                  diagnostic: show the chip ID on the home screen
            findmark                diagnostic: find MARK.BIN in the SPI flash, show its address
            dumpboot                diagnostic: copy the bootloader over MARK.BIN (at 0x247000)
@@ -19,8 +21,8 @@ Produces next to the input:
 
 Patches with assembly (notify_boost, chipid, findmark, dumpboot) all use the
 same free area, so at most one of them can be selected. Byte patches
-(pid_fix) touch nothing else and combine with any of them, e.g.
--p notify_boost,pid_fix.
+(pid_fix, no_snap) touch nothing else and combine with any of them, e.g.
+-p notify_boost,pid_fix,no_snap.
 
 Needs arm-none-eabi-as / arm-none-eabi-ld / arm-none-eabi-objcopy.
 """
@@ -71,6 +73,21 @@ PATCHES = {
         'expect': {
             0x08021620: bytes.fromhex('b9f90200'),                  # ldrsh.w r0, [r9, #2]
             0x0802A7CC: bytes.fromhex('0200500064005000'),          # 2-beep pattern
+        },
+    },
+    'no_snap': {
+        # Heat-screen temperature: shown = average (0x20009DD4), but replaced by
+        # the target when target - 18 <= shown < target + 18. Drop that store.
+        'bytes': {
+            0x0801B1D8: (bytes.fromhex('a7f87a00'), bytes.fromhex('aff30080')),  # strh.w r0,[r7,#122]
+            0x0801F6A0: (bytes.fromhex('a6f87600'), bytes.fromhex('aff30080')),  # strh.w r0,[r6,#118]
+            0x0801F9E4: (bytes.fromhex('a2f87600'), bytes.fromhex('aff30080')),  # strh.w r0,[r2,#118]
+        },
+        'expect': {
+            # sub.w rX, r0, #18; cmp; bgt; adds rX, #36; cmp; ble  before each store
+            0x0801B1CA: bytes.fromhex('a0f112028a4204dc24328a4201dd'),
+            0x0801F692: bytes.fromhex('a0f112028a4204dc24328a4201dd'),
+            0x0801F9D6: bytes.fromhex('a0f112038b4204dc24338b4201dd'),
         },
     },
     'chipid': {
