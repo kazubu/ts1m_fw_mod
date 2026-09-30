@@ -384,7 +384,7 @@ The earlier modification that hooked it did not work not because of the hook tar
 12. Details of each inspection item and pins used (current/relay sense etc.) in the factory inspection mode (checkMode) (ch. 6)
 13. The entire frame of the USART2 link during normal operation of the tip (H100) (the motion-detection byte[8], type byte[2], etc. are known, ch. 5)
 14. When and what the write to the IDChip (bootloader mode 7 / `IDChip Save Err`) writes to the 1-Wire EEPROM (ch. 14-15)
-15. Quantitative confirmation of the temperature overshoot (about 315℃ with a 300℃ setting). The PID call period and thermal time constant are not measured (ch. 10)
+15. Temperature overshoot (about 315℃ with a 300℃ setting, C245): the mechanism is reproduced by simulation (ch. 10), but the PID call period, heater power and thermal time constants are not measured, and the fix is not verified on the device
 
 ### Resolved (record)
 
@@ -444,7 +444,7 @@ The display uses a moving average (`0x20009DD4`, `0x0801EE00` = total/count), an
 
 ### Inside the PID function (`0x08015494`)
 
-Found by disassembly. The gains are the values read from RAM in emulation (245 tip, work_mode).
+Found by disassembly. The gains are the values read from RAM in emulation after tip detection (work_mode); they differ per tip.
 Temperature and error are in 0.1℃, `err = target − current`.
 
 | Address | Type | Content |
@@ -452,9 +452,18 @@ Temperature and error are in 0.1℃, `err = target − current`.
 | `0x200001F4` / `F6` / `F8` / `FA` | s16 | Target / current temperature / err / previous err |
 | `0x200001FC` | s32 | Output (after clamping to 0–290, the low 16 bits are copied to `0x200001D0`) |
 | `0x20000200` | s32 | Integral |
-| `0x20000204` / `208` / `20C` | float | Kp = 1.0 / Ki = 0.2 / Kd = 4.0 |
+| `0x20000204` / `208` / `20C` | float | Kp / Ki / Kd (per tip, table below) |
 | `0x200001E0` | u8 | Counter while above target (cycles 0–5) |
 | `0x200001E4` / `E8` / `EC` / `F0` | float | P term / I term / D term / current temperature (debug copies) |
+
+| Tip (`ironType`) | Kp | Ki | Kd | Integral factor for err > 300 |
+| --- | --- | --- | --- | --- |
+| 245 (1) | 1.0 | 0.2 | 4.0 | 0.001 |
+| 210 (2) | 0.4 | 0.1 | 0.03 | 0.01 |
+| 115 (3) | 0.15 | 0.1 | 0 | 0.1 |
+| H100 (5) | 0.4 | 0.3 | 2.0 | 0.01 |
+
+Where the gains are written has not been traced.
 
 Output = `P + I + D`, clamped to 0–290. The terms:
 
@@ -468,20 +477,45 @@ Output = `P + I + D`, clamped to 0–290. The terms:
   - err ≥ 0 and err is decreasing (**while approaching the target from below**)
   - err < −2 and err is increasing (while returning from an overshoot)
 
-With the integral limit of 3000 the I term can reach 600, so the I term alone exceeds the output limit of 290.
+With the integral limit of 3000 the I term can reach 600 for 245 (Ki = 0.2) and 900 for H100, exceeding the output limit of 290.
 The limit is the `movw r0, #3000` at `0x0801556C`.
 
-### Relation to overshoot (inferred)
+### Overshoot: thermal-model simulation (`pid_sim.py`)
 
-On the actual device, with a 300℃ setting the temperature is observed to rise to about 315℃ and then fall. The inference from the code:
+On the actual device (C245 tip, the C2 shape), a 300℃ setting rises to about 315℃ and then falls.
+`pid_sim.py` connects the PID to a thermal model to reproduce this.
+The PID is either the firmware function itself run in Unicorn, or a Python transcription.
+`python3 pid_sim.py --check` confirms that the two give identical outputs on 3000 random inputs for every tip type, and also for the patch below.
+The plant (heater mass + tip mass, the reading as a first-order lag of the heater) is assumed, **not fitted to a real tip**, so treat the magnitudes as indicative.
 
-1. The integral builds up while approaching the target, the I term exceeds 290, and the target is reached with the output saturated
-2. Near the target P is 0 (dead band) and D is disabled while approaching, so nothing brakes
-3. While above target the integral decreases only once every 6 passes, so near-full output continues up to +6℃
-4. Beyond +6℃ the integral is reset to 0 and the output finally drops. The rest is the tip's thermal lag
+The inference first written here, that the integral saturates and the I term alone keeps the output full, **holds for 210 / 115 / H100 but not for 245**:
 
-The PID call period and the device's thermal time constant have not been measured, so the +15℃ magnitude itself is not confirmed.
-Candidate fixes (all change heater control, so take care): lower the integral limit to about 1450 (I term ≤ 290), reset the integral as soon as the target is exceeded, enable D while approaching.
+| Tip | Integral at 300℃ (I term) | What drives the overshoot |
+| --- | --- | --- |
+| 245 | about 250–600 (50–120) | Small integral (factor 0.001 on the far path). No braking: P is in its dead band and D is off while approaching. The residual I term is several times the holding output |
+| 210 | about 1300–2800 (130–280) | Integral near saturation |
+| 115 | 3000 (300); the far path reaches 13000+ unclamped | Output full up to the target |
+| H100 | about 1100–2800 (330–850) | Output full up to the target (Ki = 0.3) |
+
+With a small reading lag (≤ 0.3 s) the peak is 304–309℃ for every tip, bounded by the +6℃ integral reset.
+312–319℃ is reproduced with a lag of 1.5–2 s. For C245 (`python3 pid_sim.py`):
+
+| Fix | 60W, lag 2.0 s, 50 ms | 80W, lag 2.0 s, 100 ms | 130W, lag 1.5 s, 50 ms | After settling |
+| --- | --- | --- | --- | --- |
+| Original | 312.3 | 316.0 | 318.9 | Mean 299–303℃, ripple 2–5℃ |
+| Reset the integral at +0℃ | 310.8 | 316.0 | 318.9 | Ripple increases (3–5℃) |
+| D on while approaching | 310.0 | 305.8 | 307.8 | Ripple 1–5℃ |
+| **D on while approaching + no P dead band** | **310.0** | **305.1** | **307.7** | **About 299.5℃, ripple 0.0℃** |
+| Above + Kd 4→8 + reset at +0℃ | 305.1 | 301.2 | 301.5 | Ripple 2–4℃ |
+
+The time to reach the target grows by 0.1–0.5 s. The fixes that work depend on the tip: for 115, lowering the integral limit works; for 210 / H100, resetting at +0℃ works; for 210 / 115, enabling D does nothing (Kd ≈ 0).
+
+The recommended fix for 245 is two instructions (not yet built as a patch; it changes heater control, so take care):
+
+| Address | Original | Change | Effect |
+| --- | --- | --- | --- |
+| `0x0801559A` | `4ff0000a` (`mov.w sl, #0`) | `aff30080` (`nop.w`) | Keep D active while approaching |
+| `0x080155B4` | `01d9` (`bls`) | `00bf` (`nop`) | No P dead band |
 
 ### Buzzer
 

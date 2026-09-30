@@ -339,6 +339,22 @@ What could be confirmed by rewriting TS1M.TXT:
 | ch13 | supply voltage | `0x2000039C` (mV) |
 | ch0 | external thermocouple (TK) | `0x200008A4` (≒ ch0 × 1.17) |
 
+## Calling the PID directly (`pid_sim.py`)
+
+`pid_sim.py` boots once with `defaults=True, work_mode=True, force_tip=N` (about 30 s), clears the PID state
+(`0x200001E0`–`0x20000203`, keeping the gains at `0x20000204`), and then calls `0x08015494` directly for each step:
+write the target to `0x200001F4`, set r0 = current temperature, SP to a scratch stack and LR to `_RET_TRAP`, and read the output from `0x200001D0`.
+A thermal model supplies the next temperature (ANALYSIS.md ch. 10).
+
+```
+python3 pid_sim.py            # C245: reproduce the overshoot and compare fixes
+python3 pid_sim.py --tips     # all tip types
+python3 pid_sim.py --check    # Python transcription vs the firmware (a few minutes)
+```
+
+Note: **patching code with `mem_write` after it has run has no effect** — Unicorn keeps executing the block it already translated.
+Apply code patches to the image before boot (`FirmwarePID(patches=...)` does this).
+
 ## Unresolved
 
 - The effect of the HEX line structure is bootloader processing, so it cannot be investigated

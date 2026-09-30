@@ -18,6 +18,7 @@ By finding that files on the DFU drive live in the external SPI flash, the **boo
 - [EMULATION.md](EMULATION.md) — Unicorn emulation procedure and findings
 - [ts1m_emu.py](ts1m_emu.py) — the application emulator harness
 - [bl_emu.py](bl_emu.py) — the bootloader emulator harness (models the IDChip 1-Wire and the accelerometer I2C)
+- [pid_sim.py](pid_sim.py) — thermal-model simulation of the heater PID (runs the firmware PID in Unicorn; ANALYSIS.md ch. 10)
 - [hex2bin.py](hex2bin.py) — Intel HEX → raw binary converter
 - [patches/](patches/) — the target-reached beep + auto boost + boost indicator patch (ANALYSIS.md ch. 11), and diagnostic patches (chip ID, DFU file search, bootloader dump)
 

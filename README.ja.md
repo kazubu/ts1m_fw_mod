@@ -22,6 +22,7 @@ DFU ドライブのファイルが外部 SPI フラッシュ上にあること�
 - [EMULATION.ja.md](EMULATION.ja.md) — Unicorn によるエミュレーションの手順と知見
 - [ts1m_emu.py](ts1m_emu.py) — アプリのエミュレータハーネス
 - [bl_emu.py](bl_emu.py) — ブートローダのエミュレータハーネス (IDChip 1-Wire / 加速度センサー I2C をモデル化)
+- [pid_sim.py](pid_sim.py) — ヒーター PID の熱モデルシミュレーション (ファームの PID を Unicorn で実行。ANALYSIS.ja.md 10章)
 - [hex2bin.py](hex2bin.py) — Intel HEX → raw binary 変換
 - [patches/](patches/) — 目標温度到達通知 + 自動ブースト + ブースト表示のパッチ (ANALYSIS.ja.md 11章)、診断パッチ (チップ ID、DFU ファイル探索、ブートローダ吸い出し)
 
