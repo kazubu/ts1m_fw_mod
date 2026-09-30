@@ -5,6 +5,7 @@ Thermal-model simulation of the TS1M PID (0x08015494).
     python3 pid_sim.py              # C245: reproduce the overshoot, compare fixes
     python3 pid_sim.py --tips       # all tip types, sensor lag sweep
     python3 pid_sim.py --check      # PyPID vs the firmware PID in Unicorn (slow)
+    python3 pid_sim.py --check-image TS1M_Master_APP_V202_EN_pid_fix.bin
 
 The controller is either the firmware's own PID function run in Unicorn
 (FirmwarePID) or PyPID, a Python transcription used for fast sweeps. --check
@@ -32,9 +33,14 @@ sys.path.insert(0, HERE)
 OUT_MAX = 290
 TIP_NAMES = {1: '245', 2: '210', 3: '115', 5: 'H100'}
 
-# Byte patch: keep D active while approaching from below, and drop the P dead band.
-PATCH_D_APPROACH = (0x0801559A, 'aff30080')   # mov.w sl, #0 -> nop.w
-PATCH_NO_DEADBAND = (0x080155B4, '00bf')      # bls          -> nop
+
+
+def pid_fix_patches():
+    """patches/build.py -p pid_fix as [(addr, hex)]: keep D active while
+    approaching from below (0x0801559A) and drop the P dead band (0x080155B4)."""
+    sys.path.insert(0, os.path.join(HERE, 'patches'))
+    from build import PATCHES
+    return [(addr, new.hex()) for addr, (_, new) in PATCHES['pid_fix']['bytes'].items()]
 
 
 class PyPID:
@@ -98,11 +104,11 @@ class PyPID:
 class FirmwarePID:
     """Boots the firmware once (about 30 s), then calls PID(r0 = cur) directly."""
 
-    def __init__(self, iron_type=1, patches=()):
+    def __init__(self, iron_type=1, patches=(), image=None):
         from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_SP, UC_ARM_REG_LR
         from ts1m_emu import Emu, IRONTYPE
         self._regs = (UC_ARM_REG_R0, UC_ARM_REG_SP, UC_ARM_REG_LR)
-        image = os.path.join(HERE, 'TS1M_Master_APP_V202_EN.bin')
+        image = image or os.path.join(HERE, 'TS1M_Master_APP_V202_EN.bin')
         tmp = None
         if patches:
             # Patch the image before boot: a mem_write to code that has already
@@ -224,14 +230,20 @@ def report_tips():
                       f" {s['final']:6.1f} {s['ripple']:5.1f}  {at[4]:5} ({at[4] * pid.ki:4.0f})")
 
 
-def check(n=3000):
-    """Random-input comparison, PyPID vs the firmware. Returns True if identical."""
+def check(n=3000, image=None):
+    """Random-input comparison, PyPID vs the firmware. Returns True if identical.
+
+    With `image` (a pid_fix build from patches/build.py), only that image is
+    checked, against PyPID with the pid_fix behaviour."""
     ok = True
-    runs = [(it, (), {}) for it in TIP_NAMES]
-    runs.append((1, (PATCH_D_APPROACH, PATCH_NO_DEADBAND),
-                 dict(fix={'d_approach'}, deadband=(1, 0))))
+    fixed = dict(fix={'d_approach'}, deadband=(1, 0))
+    if image:
+        runs = [(1, (), fixed)]
+    else:
+        runs = [(it, (), {}) for it in TIP_NAMES]
+        runs.append((1, tuple(pid_fix_patches()), fixed))
     for it, patches, kw in runs:
-        fw = FirmwarePID(it, patches)
+        fw = FirmwarePID(it, patches, image)
         py = PyPID(it, **kw)
         assert all(abs(a - b) < 1e-6 for a, b in zip(fw.gains(), (py.kp, py.ki, py.kd)))
         rnd = random.Random(it)
@@ -242,7 +254,9 @@ def check(n=3000):
             if k % 500 == 0:
                 cur = rnd.randint(0, 4500)
             bad += fw.step(cur, 3000) != py.step(cur, 3000)
-        label = TIP_NAMES[it] + (' +patch' if patches else '')
+        label = TIP_NAMES[it] + (' +pid_fix' if patches else '')
+        if image:
+            label = os.path.basename(image)
         print(f'{label:12} gains {fw.gains()}  mismatches {bad}/{n}')
         ok &= bad == 0
     return ok
@@ -252,9 +266,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     ap.add_argument('--tips', action='store_true', help='sweep all tip types')
     ap.add_argument('--check', action='store_true', help='compare with the firmware')
+    ap.add_argument('--check-image', metavar='BIN',
+                    help='check a pid_fix build (e.g. *_pid_fix.bin) against PyPID')
     a = ap.parse_args()
-    if a.check:
-        sys.exit(0 if check() else 1)
+    if a.check or a.check_image:
+        sys.exit(0 if check(image=a.check_image) else 1)
     if a.tips:
         report_tips()
     else:

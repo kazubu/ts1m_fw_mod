@@ -20,7 +20,7 @@ By finding that files on the DFU drive live in the external SPI flash, the **boo
 - [bl_emu.py](bl_emu.py) — the bootloader emulator harness (models the IDChip 1-Wire and the accelerometer I2C)
 - [pid_sim.py](pid_sim.py) — thermal-model simulation of the heater PID (runs the firmware PID in Unicorn; ANALYSIS.md ch. 10)
 - [hex2bin.py](hex2bin.py) — Intel HEX → raw binary converter
-- [patches/](patches/) — the target-reached beep + auto boost + boost indicator patch (ANALYSIS.md ch. 11), and diagnostic patches (chip ID, DFU file search, bootloader dump)
+- [patches/](patches/) — the target-reached beep + auto boost + boost indicator patch (ANALYSIS.md ch. 11), the PID overshoot fix (ch. 10), and diagnostic patches (chip ID, DFU file search, bootloader dump)
 
 ## What is known (summary)
 
@@ -70,6 +70,26 @@ The heat screen rendered on the emulator's virtual panel (regenerate with `pytho
 - The boosted target is used only during the PID call and restored immediately. The heater control and safety code are not touched.
 - The parameters (thresholds, boost amount, indicator color) can be changed via the `.equ` values at the top of `patches/notify_boost.S`.
 - Only the affected lines of the original HEX are rewritten, so the line count and structure match the original.
+
+### PID fix: less overshoot (`pid_fix`, not verified on the device)
+
+```
+python3 patches/build.py -p pid_fix                # -> TS1M_Master_APP_V202_EN_pid_fix.hex / .bin
+python3 patches/build.py -p notify_boost,pid_fix   # both -> *_notify_boost_pid_fix.hex / .bin
+python3 pid_sim.py --check-image TS1M_Master_APP_V202_EN_pid_fix.bin   # emulator check
+```
+
+Two instructions in the PID (`0x08015494`) are replaced by `nop` (ANALYSIS.md ch. 10):
+
+| Address | Change | Effect |
+| --- | --- | --- |
+| `0x0801559A` | `mov.w sl, #0` → `nop.w` | D stays active while approaching the target from below (it used to be off, so nothing braked) |
+| `0x080155B4` | `bls` → `nop` | No P dead band (P used to be 0 within −4 to +5 °C of the target) |
+
+- Aimed at the 245 tip (C245): in the thermal-model simulation, the cases that overshoot to 312–319 °C at a 300 °C setting peak at 305–310 °C, and settle at about 299.5 °C without ripple. The time to reach the target grows by 0.1–0.5 s. The plant is assumed, so the numbers are indicative.
+- For 210 / 115 (Kd ≈ 0) the D change does nothing.
+- It **changes heater control** (overheat protection, resistance check and the 450 °C cap are untouched). It has **not been tried on the device**; watch the temperature on the first heat-up.
+- A byte patch that does not use the free area, so it can be combined with `notify_boost`.
 
 ### Diagnostic patch: chip ID display
 

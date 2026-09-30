@@ -24,7 +24,7 @@ DFU ドライブのファイルが外部 SPI フラッシュ上にあること�
 - [bl_emu.py](bl_emu.py) — ブートローダのエミュレータハーネス (IDChip 1-Wire / 加速度センサー I2C をモデル化)
 - [pid_sim.py](pid_sim.py) — ヒーター PID の熱モデルシミュレーション (ファームの PID を Unicorn で実行。ANALYSIS.ja.md 10章)
 - [hex2bin.py](hex2bin.py) — Intel HEX → raw binary 変換
-- [patches/](patches/) — 目標温度到達通知 + 自動ブースト + ブースト表示のパッチ (ANALYSIS.ja.md 11章)、診断パッチ (チップ ID、DFU ファイル探索、ブートローダ吸い出し)
+- [patches/](patches/) — 目標温度到達通知 + 自動ブースト + ブースト表示のパッチ (ANALYSIS.ja.md 11章)、PID のオーバーシュート修正 (10章)、診断パッチ (チップ ID、DFU ファイル探索、ブートローダ吸い出し)
 
 ## 分かっていること (要点)
 
@@ -75,6 +75,26 @@ python3 patches/screenshot.py         # 加熱画面を仮想パネルに描画 
 - ブーストで上げた目標は PID 呼び出しの間だけ使い、すぐ元に戻す。ヒーター制御と安全装置のコードには触れていない
 - パラメータ (しきい値・上昇幅・表示色) は `patches/notify_boost.S` 先頭の `.equ` で変更できる
 - 元 HEX の該当行だけを書き換えるので、行数と構造は元と同じ
+
+### PID 修正: オーバーシュート低減 (`pid_fix`、実機未確認)
+
+```
+python3 patches/build.py -p pid_fix                # -> TS1M_Master_APP_V202_EN_pid_fix.hex / .bin
+python3 patches/build.py -p notify_boost,pid_fix   # 両方 -> *_notify_boost_pid_fix.hex / .bin
+python3 pid_sim.py --check-image TS1M_Master_APP_V202_EN_pid_fix.bin   # エミュレータでの確認
+```
+
+PID (`0x08015494`) の 2 命令を `nop` に置き換える (ANALYSIS.ja.md 10章):
+
+| アドレス | 変更 | 効果 |
+| --- | --- | --- |
+| `0x0801559A` | `mov.w sl, #0` → `nop.w` | 下から目標に近づく間も D を有効にする (元は無効で減速がなかった) |
+| `0x080155B4` | `bls` → `nop` | P の不感帯をなくす (元は目標の −4〜+5℃ で P が 0) |
+
+- 245 チップ (C245) 向け: 熱モデルのシミュレーションでは、300℃ 設定で 312–319℃ まで上がる条件が 305–310℃ 止まりになり、揺れなしで約 299.5℃ に落ち着く。目標到達は 0.1–0.5 秒遅くなる。プラントは仮定なので数値は目安
+- 210 / 115 (Kd ≈ 0) では D の変更は効かない
+- **ヒーター制御の変更**である (過熱保護・抵抗値チェック・450℃ 上限には触れていない)。**実機では未確認**なので、最初の昇温は温度を見ながら試すこと
+- 空き領域を使わないバイトパッチなので `notify_boost` と組み合わせられる
 
 ### 診断パッチ: チップ ID 表示
 

@@ -510,7 +510,7 @@ With a small reading lag (≤ 0.3 s) the peak is 304–309℃ for every tip, bou
 
 The time to reach the target grows by 0.1–0.5 s. The fixes that work depend on the tip: for 115, lowering the integral limit works; for 210 / H100, resetting at +0℃ works; for 210 / 115, enabling D does nothing (Kd ≈ 0).
 
-The recommended fix for 245 is two instructions (not yet built as a patch; it changes heater control, so take care):
+The recommended fix for 245 is two instructions, built as `python3 patches/build.py -p pid_fix` (combinable: `-p notify_boost,pid_fix`). It changes heater control and is not verified on the device, so take care:
 
 | Address | Original | Change | Effect |
 | --- | --- | --- | --- |

@@ -2,9 +2,11 @@
 """
 Build a patched TS1M HEX from one of the patch sources in this directory.
 
-    python3 patches/build.py [-p PATCH] [TS1M_Master_APP_V202_EN.hex]
+    python3 patches/build.py [-p PATCH[,PATCH...]] [TS1M_Master_APP_V202_EN.hex]
 
     PATCH  notify_boost (default)  target-reached beep, auto boost, boost indicator
+           pid_fix                 PID: keep D active while approaching, no P dead band
+                                   (in-place byte patch, 2 instructions)
            chipid                  diagnostic: show the chip ID on the home screen
            findmark                diagnostic: find MARK.BIN in the SPI flash, show its address
            dumpboot                diagnostic: copy the bootloader over MARK.BIN (at 0x247000)
@@ -13,9 +15,12 @@ Produces next to the input:
     *_<PATCH>.hex   patched HEX, only the affected lines rewritten
                     (same line count and record layout as the original)
     *_<PATCH>.bin   flat image for ts1m_emu.py
+(for several patches the suffix is the names joined with '_').
 
-Each patch is built against the original firmware on its own; they are not
-meant to be combined (all use the same free area).
+Patches with assembly (notify_boost, chipid, findmark, dumpboot) all use the
+same free area, so at most one of them can be selected. Byte patches
+(pid_fix) touch nothing else and combine with any of them, e.g.
+-p notify_boost,pid_fix.
 
 Needs arm-none-eabi-as / arm-none-eabi-ld / arm-none-eabi-objcopy.
 """
@@ -39,8 +44,24 @@ COMMON_EXPECT = {
     0x08028580: b'Hello, World!',
 }
 
-# name -> sites [(call site, original 4 bytes, symbol)], extra expected bytes
+# name -> sites [(call site, original 4 bytes, symbol)], extra expected bytes,
+#         bytes {addr: (original, replacement)} for in-place byte patches.
+# A patch with sites is assembled from <name>.S into the free area.
 PATCHES = {
+    'pid_fix': {
+        # PID 0x08015494, see ANALYSIS.md ch. 10 and pid_sim.py.
+        'bytes': {
+            # mov.w sl, #0 -> nop.w: D was disabled while err >= 0 and falling
+            0x0801559A: (bytes.fromhex('4ff0000a'), bytes.fromhex('aff30080')),
+            # bls -> nop: P was 0 while -40 <= err <= 50 (dead band)
+            0x080155B4: (bytes.fromhex('01d9'), bytes.fromhex('00bf')),
+        },
+        'expect': {
+            0x08015596: bytes.fromhex('a01b01d5'),                  # subs r0,r4,r6; bpl
+            0x080155AE: bytes.fromhex('04f128005a28'),              # add.w r0,r4,#40; cmp r0,#90
+            0x080155B6: bytes.fromhex('cdf804b0'),                  # str.w fp, [sp, #4]
+        },
+    },
     'notify_boost': {
         'sites': [
             (0x08021624, bytes.fromhex('316c8847'), 'hook'),           # ldr r1,[r6,#64]; blx r1
@@ -169,15 +190,29 @@ def patch_hex_lines(src_path, dst_path, patches):
 def main(argv):
     import argparse
     ap = argparse.ArgumentParser(description='Build a patched TS1M HEX.')
-    ap.add_argument('-p', '--patch', default='notify_boost', choices=sorted(PATCHES))
+    ap.add_argument('-p', '--patch', default='notify_boost',
+                    help='comma-separated: ' + ', '.join(sorted(PATCHES)))
     ap.add_argument('hex', nargs='?', default=os.path.join(os.path.dirname(HERE),
                                                            'TS1M_Master_APP_V202_EN.hex'))
     args = ap.parse_args(argv[1:])
+    names = args.patch.split(',')
+    for name in names:
+        if name not in PATCHES:
+            ap.error(f'unknown patch {name!r} (choose from {", ".join(sorted(PATCHES))})')
+    if len(set(names)) != len(names):
+        ap.error('patch given twice')
+    hooked = [n for n in names if PATCHES[n].get('sites')]
+    if len(hooked) > 1:
+        ap.error(f'{" and ".join(hooked)} both use the free area at {HOOK_ADDR:#x}')
     src = args.hex
-    stem = src.rsplit('.', 1)[0] + '_' + args.patch
-    sites = PATCHES[args.patch]['sites']
-    expect = {**COMMON_EXPECT, **PATCHES[args.patch]['expect'],
-              **{addr: orig for addr, orig, _ in sites}}
+    stem = src.rsplit('.', 1)[0] + '_' + '_'.join(names)
+
+    expect = dict(COMMON_EXPECT) if hooked else {}
+    for name in names:
+        p = PATCHES[name]
+        expect.update(p['expect'])
+        expect.update({addr: orig for addr, orig, _ in p.get('sites', ())})
+        expect.update({addr: orig for addr, (orig, _) in p.get('bytes', {}).items()})
 
     mem = parse_hex(src)
     for addr, want in expect.items():
@@ -185,15 +220,25 @@ def main(argv):
         if have != want:
             raise SystemExit(f'unexpected bytes at {addr:#x}: {have.hex()} != {want.hex()}')
 
-    code, syms = assemble(args.patch)
-    if HOOK_ADDR + len(code) > HOOK_LIMIT:
-        raise SystemExit(f'hook is {len(code)} bytes, only {HOOK_LIMIT - HOOK_ADDR} available')
-
     patches = {}
-    for i, b in enumerate(code):
-        patches[HOOK_ADDR + i] = b
-    for addr, _, sym in sites:
-        for i, b in enumerate(thumb_bl(addr, syms[sym])):
+    code = b''
+    sites = []
+    if hooked:
+        sites = PATCHES[hooked[0]]['sites']
+        code, syms = assemble(hooked[0])
+        if HOOK_ADDR + len(code) > HOOK_LIMIT:
+            raise SystemExit(f'hook is {len(code)} bytes, only {HOOK_LIMIT - HOOK_ADDR} available')
+        for i, b in enumerate(code):
+            patches[HOOK_ADDR + i] = b
+        for addr, _, sym in sites:
+            for i, b in enumerate(thumb_bl(addr, syms[sym])):
+                patches[addr + i] = b
+    byte_sites = [(addr, orig, new) for n in names
+                  for addr, (orig, new) in PATCHES[n].get('bytes', {}).items()]
+    for addr, orig, new in byte_sites:
+        assert len(orig) == len(new)
+        for i, b in enumerate(new):
+            assert addr + i not in patches, f'patches overlap at {addr + i:#x}'
             patches[addr + i] = b
 
     nlines, touched = patch_hex_lines(src, stem + '.hex', patches)
@@ -208,10 +253,13 @@ def main(argv):
     with open(stem + '.bin', 'wb') as fh:
         fh.write(blob)
 
-    print(f'hook: {len(code)} bytes at {HOOK_ADDR:#010x} '
-          f'({HOOK_LIMIT - HOOK_ADDR - len(code)} spare)')
+    if hooked:
+        print(f'hook: {len(code)} bytes at {HOOK_ADDR:#010x} '
+              f'({HOOK_LIMIT - HOOK_ADDR - len(code)} spare)')
     for addr, orig, sym in sites:
         print(f'site: {addr:#010x} {orig.hex()} -> {thumb_bl(addr, syms[sym]).hex()} ({sym})')
+    for addr, orig, new in byte_sites:
+        print(f'byte: {addr:#010x} {orig.hex()} -> {new.hex()}')
     print(f'{stem}.hex: {nlines} lines, {touched} rewritten, {len(diff)} bytes changed')
     print(f'{stem}.bin: {len(blob)} bytes')
 
