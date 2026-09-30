@@ -384,6 +384,7 @@ The earlier modification that hooked it did not work not because of the hook tar
 12. Details of each inspection item and pins used (current/relay sense etc.) in the factory inspection mode (checkMode) (ch. 6)
 13. The entire frame of the USART2 link during normal operation of the tip (H100) (the motion-detection byte[8], type byte[2], etc. are known, ch. 5)
 14. When and what the write to the IDChip (bootloader mode 7 / `IDChip Save Err`) writes to the 1-Wire EEPROM (ch. 14-15)
+15. Quantitative confirmation of the temperature overshoot (about 315℃ with a 300℃ setting). The PID call period and thermal time constant are not measured (ch. 10)
 
 ### Resolved (record)
 
@@ -440,6 +441,47 @@ The heater control `0x080214A0` runs each cycle as follows.
 Since the target temperature is rewritten every cycle, if you rewrite it only just before the PID call, it affects only that cycle's control.
 
 The display uses a moving average (`0x20009DD4`, `0x0801EE00` = total/count), and shows the target value if within ±1.8℃ of the target.
+
+### Inside the PID function (`0x08015494`)
+
+Found by disassembly. The gains are the values read from RAM in emulation (245 tip, work_mode).
+Temperature and error are in 0.1℃, `err = target − current`.
+
+| Address | Type | Content |
+| --- | --- | --- |
+| `0x200001F4` / `F6` / `F8` / `FA` | s16 | Target / current temperature / err / previous err |
+| `0x200001FC` | s32 | Output (after clamping to 0–290, the low 16 bits are copied to `0x200001D0`) |
+| `0x20000200` | s32 | Integral |
+| `0x20000204` / `208` / `20C` | float | Kp = 1.0 / Ki = 0.2 / Kd = 4.0 |
+| `0x200001E0` | u8 | Counter while above target (cycles 0–5) |
+| `0x200001E4` / `E8` / `EC` / `F0` | float | P term / I term / D term / current temperature (debug copies) |
+
+Output = `P + I + D`, clamped to 0–290. The terms:
+
+- **P** = `err × Kp`, but **0 while err is between −40 and +50 (−4℃ to +5℃)** (dead band; the factor is 1.0 only when `(err+40) > 90`)
+- **I** = `integral × Ki`. Integral update:
+  - err > 300 (more than 30℃ below target): `integral += err × k`, where k depends on `ironType` (1=245: 0.001, 2=210 / 5=H100: 0.01, others 0.1). **This path skips the 3000 clamp**
+  - err ≤ 300: `integral += err × 0.1` only when the counter is 0, then clamped to an **upper limit of 3000**
+  - If current ≥ target and the overshoot is > 60 (6℃) or the integral is < 0, integral = 0
+- Counter: 0 while below target; while above target it is incremented each pass and wraps to 0 after 5 (also 0 when more than 4℃ above). So **while above target, the integral advances only once every 6 passes**
+- **D** = `(err − previous err) × Kd`, upper limit +20 (no lower limit). It is **0** when:
+  - err ≥ 0 and err is decreasing (**while approaching the target from below**)
+  - err < −2 and err is increasing (while returning from an overshoot)
+
+With the integral limit of 3000 the I term can reach 600, so the I term alone exceeds the output limit of 290.
+The limit is the `movw r0, #3000` at `0x0801556C`.
+
+### Relation to overshoot (inferred)
+
+On the actual device, with a 300℃ setting the temperature is observed to rise to about 315℃ and then fall. The inference from the code:
+
+1. The integral builds up while approaching the target, the I term exceeds 290, and the target is reached with the output saturated
+2. Near the target P is 0 (dead band) and D is disabled while approaching, so nothing brakes
+3. While above target the integral decreases only once every 6 passes, so near-full output continues up to +6℃
+4. Beyond +6℃ the integral is reset to 0 and the output finally drops. The rest is the tip's thermal lag
+
+The PID call period and the device's thermal time constant have not been measured, so the +15℃ magnitude itself is not confirmed.
+Candidate fixes (all change heater control, so take care): lower the integral limit to about 1450 (I term ≤ 290), reset the integral as soon as the target is exceeded, enable D while approaching.
 
 ### Buzzer
 
