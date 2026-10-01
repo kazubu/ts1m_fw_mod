@@ -52,6 +52,10 @@ PLAN = [
     (2100, 4350, 1, 4500),
     (2300, 4500, 2, 4500),                  # sleep: no beep, no boost
     (2400, 4500, 1, 4500),                  # back to work: beep again
+    (2500, 3000, 1, 3000),                  # set 300 and reach it: beep
+    (2600, 1500, 3, 3000),                  # heater off (PID not called), tip cools
+    (2700, 1500, 1, 3000),                  # heater on, same set temp, cold tip: no boost
+    (2800, 3000, 1, 3000),                  # reached again: beep
 ]
 
 
@@ -102,7 +106,7 @@ class Scenario(Emu):
 def main(argv):
     image = argv[1] if len(argv) > 1 else os.path.join(
         ROOT, 'TS1M_Master_APP_V202_EN_notify_boost.bin')
-    s = Scenario(image).run(count=80_000_000)
+    s = Scenario(image).run(count=100_000_000)
     assert s.err is None and not s.halted, (s.err, s.halted)
 
     beeps = [p for p, pat in s.beeps if pat == HOOK_PATTERN]
@@ -120,8 +124,8 @@ def main(argv):
         return [r for r in boosted if a <= r[0] < b]
 
     checks = {
-        'one beep per reached target (heat-up, 440, 450, after sleep)':
-            len(beeps) == 4 and beeps[0] < 300,
+        'one beep per reached target (heat-up, 440, 450, after sleep, after off)':
+            len(beeps) == 6 and beeps[0] < 300 and 2700 <= beeps[5] < 2800,
         'no beep while sleeping': not [p for p in beeps if 2100 <= p < 2300],
         'target restored to the set value after every PID call':
             all(r[3] == r[5] for r in s.rows if r[0] > 1),
@@ -135,6 +139,7 @@ def main(argv):
         'boost capped at 450.0': all(r[2] == 4500 for r in in_(1800, 1900)) and in_(1800, 1900),
         'set 450: target untouched': not in_(1900, 2100),
         'no boost while sleeping': not in_(2100, 2300),
+        'no boost after heater off/on': not in_(2600, 2800),
         'display flag set exactly when the target was raised':
             all(r[6] == (1 if r[2] != r[3] else 0) for r in s.rows if r[0] > 1 and len(r) > 6),
     }

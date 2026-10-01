@@ -384,7 +384,7 @@ The earlier modification that hooked it did not work not because of the hook tar
 12. Details of each inspection item and pins used (current/relay sense etc.) in the factory inspection mode (checkMode) (ch. 6)
 13. The entire frame of the USART2 link during normal operation of the tip (H100) (the motion-detection byte[8], type byte[2], etc. are known, ch. 5)
 14. When and what the write to the IDChip (bootloader mode 7 / `IDChip Save Err`) writes to the 1-Wire EEPROM (ch. 14-15)
-15. Temperature overshoot (about 315℃ with a 300℃ setting, C245): the mechanism is reproduced by simulation (ch. 10), but the PID call period, heater power and thermal time constants are not measured, and the fix is not verified on the device
+15. Temperature overshoot (C245, 300℃ setting): with `pid_fix` the device peaks at about 306℃ (300℃ in about 11 s, 60W). The first observation of about 315℃ may have been the `notify_boost` off/on bug. An A/B test with and without `pid_fix` on the device is still needed (ch. 10)
 
 ### Resolved (record)
 
@@ -526,6 +526,14 @@ The recommended fix for 245 is two instructions, built as `python3 patches/build
 | `0x0801559A` | `4ff0000a` (`mov.w sl, #0`) | `aff30080` (`nop.w`) | Keep D active while approaching |
 | `0x080155B4` | `01d9` (`bls`) | `00bf` (`nop`) | No P dead band |
 
+**Device test (2026-10-02, C245, POW shown as 60W, from 36℃, `notify_boost,pid_fix,no_snap`):**
+
+- Heater off then on again: the digits turned red (boost) and the reading rose to about 320℃. This was a `notify_boost` bug (ch. 11), not the PID
+- Without that: 300℃ in about 11 s, peak about 306℃
+
+With 60W, the plants that reproduce "11 s / 306℃" under `pid_fix` (`P60`, lag 0.5–2.0 s) give about 305–306℃ for the original PID too; there `pid_fix` mainly removes the ripple after settling (original 0.1–3.2℃, `pid_fix` about 0.2℃) rather than lowering the peak.
+The about 315℃ first observed was with `notify_boost` installed, so it may have been the same boost bug. An A/B test on the device (`notify_boost,no_snap` with and without `pid_fix`, cold start, no off/on) is still needed.
+
 ### Why the PID looks like this (speculation)
 
 Nothing in the code states the design intent; this is read from its structure. It looks less like an analytically designed PID
@@ -608,9 +616,11 @@ python3 patches/screenshot.py         # draw the heating screen to the virtual p
 | Boost cap | 450.0℃. If the setting is 450.0℃ or more, do nothing (never lowers the target) |
 | Boost end | When it recovers to the set temperature. If it continues for 20 seconds, abort, and do not restart until it recovers |
 | Disabled | Outside working mode (sleep etc.), calibration mode (CAL), target 0 |
-| Boost display | While the target is actually raised, make the large current-temperature digits on the heating screen red (`0xF800`) from white |
+| Boost display | While the target is actually raised, make the large current-temperature digits on the heating screen orange (`0xFD20`) from white. Red (`0xF800`) until 2026-10-02, changed because the firmware draws the set value in `0xFC0A` (coral, RGB 255/130/82) while it is being edited, which was hard to tell from red |
 
 Parameters can be changed via the `.equ` at the top of `patches/notify_boost.S` (display color is `BOOST_COLOR`, RGB565).
+
+**Bug fixed (2026-10-02): boost after heater off/on.** The hook runs at the PID call site, and the PID is not called while the heater is off (MODE 0/3), so "off" never reached the idle path that re-arms. Turning the heater back on at the same set temperature kept "reached" set, the cold tip counted as a droop, and the boost started after 300 ms (seen on the device: red digits, reading up to about 320℃). The hook now treats a gap of more than `GAP_MS` (1000 ms) between calls as "heater was off" and re-arms. This uses the last 16 bytes of the free area (348 / 348 bytes).
 
 ### Boost display
 
@@ -619,15 +629,15 @@ The heating screen (UI page 1) draws the current temperature with `drawString(st
 
 | Replacement site | Original instruction | Display style | After replacement |
 | --- | --- | --- | --- |
-| `0x0801FA28` | `movw r1, #0xFFFF` (r1 → fg) | Normal (with graph) | `bl temp_color_a` (r1 = white / red) |
-| `0x0801B21A` | `str.w r9, [sp]` (r9 = `0xFFFF`) | 7-seg style (`[0x20000455] != 0`) | `bl temp_color_b` ([sp] = white / red) |
+| `0x0801FA28` | `movw r1, #0xFFFF` (r1 → fg) | Normal (with graph) | `bl temp_color_a` (r1 = white / orange) |
+| `0x0801B21A` | `str.w r9, [sp]` (r9 = `0xFFFF`) | 7-seg style (`[0x20000455] != 0`) | `bl temp_color_b` ([sp] = white / orange) |
 
 Both just look at the "target raised in this pass" flag (state +14) that the hook writes on each PID call.
-It does not touch the branch (`0x0801F990`) that temporarily displays the setting value in orange (`0xFC0A`) right after a temperature change.
+It does not touch the branch (`0x0801F990`) that temporarily displays the setting value in coral (`0xFC0A`) right after a temperature change.
 
 Results confirmed on the virtual panel (EMULATION.md):
-- Normal style: the digits are red only during boost, otherwise stay white
-- 7-seg style: the digits blend with the gray background, so they look pinkish rather than red. Normally stays white
+- Normal style: the digits are coloured only during boost, otherwise stay white
+- 7-seg style: the digits blend with the gray background, so the colour looks lighter (red looked pinkish). Normally stays white
 - The setting that selects the 7-seg style was not `user_UI` (it stays normal style even with `user_UI=1`).
   We set `0x20000455` directly to draw it. Which menu item switches this is not verified
 
@@ -642,6 +652,7 @@ Scenarios of `patches/test_notify_boost.py` (move the tip ADC as scripted, and r
 - A drop of less than 300ms: no boost
 - Setting 440℃: boost caps at 450.0℃. Setting 450℃: the target does not change
 - During sleep: neither notification nor boost. On returning to work, notifies again
+- Heater off (PID not called), then on at the same set temperature with a cold tip: no boost, and notifies again on reaching it (fails on the version before the fix)
 
 Running the same test on the original firmware fails the notification/boost items (confirmation that the test is effective).
 

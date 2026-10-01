@@ -53,9 +53,9 @@ python3 patches/screenshot.py         # render the heat screen on the virtual pa
 
 | Feature | Behavior |
 | --- | --- |
-| Target-reached beep | Beeps twice the first time the temperature enters ±3.0 °C of the set point. Re-armed on a setting change or wake from sleep. |
+| Target-reached beep | Beeps twice the first time the temperature enters ±3.0 °C of the set point. Re-armed on a setting change, wake from sleep, or turning the heater off and on. |
 | Auto boost | After the target has been reached once, if it stays 10.0 °C or more below for 300 ms, raise the target by +20.0 °C (capped at 450 °C). Ends on recovery, gives up after 20 s. |
-| Boost indicator | While boosting, the current-temperature digits on the heat screen turn from white to red (pinkish in the 7-segment style). |
+| Boost indicator | While boosting, the current-temperature digits on the heat screen turn from white to orange (blended with the gray background in the 7-segment style). The firmware itself draws the set value in coral (`0xFC0A`) while it is being edited. |
 
 ### Screen (boost indicator)
 

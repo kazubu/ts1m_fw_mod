@@ -39,9 +39,12 @@
     .equ HOLD_MS,      300          @ ... for this long
     .equ BOOST,        200          @ +20.0
     .equ BOOST_MAX_MS, 20000        @ give up boosting after 20 s
+    .equ GAP_MS,       1000         @ no PID call for this long = heater was off: re-arm
     .equ TMAX,         4500         @ never ask for more than 450.0
     .equ WHITE,        0xFFFF       @ normal colour of the big temperature digits
-    .equ BOOST_COLOR,  0xF800       @ RGB565 red while boosting
+    .equ BOOST_COLOR,  0xFD20       @ RGB565 orange (255,165,0) while boosting. The firmware
+                                    @ draws the set value in 0xFC0A (coral, 255,130,82) while
+                                    @ it is being edited; this was 0xF800 (red) before.
 
     @ state layout
     .equ S_MAGIC,   0
@@ -53,6 +56,7 @@
     .equ S_LOCK,    13              @ u8  boost timed out: wait for recovery before the next one
     .equ S_ACTIVE,  14              @ u8  the last PID call ran with a raised target (for the display)
     .equ S_BSTART,  16              @ u32 ms when the boost started
+    .equ S_SEEN,    20              @ u32 ms of the previous hook call
 
     .text
     .global hook
@@ -74,6 +78,17 @@ hook:                               @ r0 = current temp, r6 = 0x200001F4
 1:
     ldr     r5, =TARGET
     ldrh    r1, [r5]                @ r1 = base target, written by the firmware this pass
+    @ The PID (and so this hook) is not called while the heater is off (MODE 0/3),
+    @ so "off" never reaches the idle path below. A gap between calls means the
+    @ heater was off: reset as if idle, so turning it back on re-arms instead of
+    @ treating the cold tip as a droop and boosting.
+    ldr     r0, =MSTICK
+    ldr     r0, [r0]
+    ldr     r3, [r4, #S_SEEN]
+    str     r0, [r4, #S_SEEN]
+    subs    r3, r0, r3
+    cmp     r3, #GAP_MS
+    bhi     idle
     ldr     r2, =MODE
     ldrb    r2, [r2]
     cmp     r2, #1
